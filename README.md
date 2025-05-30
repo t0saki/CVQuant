@@ -229,9 +229,9 @@ If you use this project in your research, please cite:
 ```bibtex
 @misc{pytorch-quantization-benchmark,
   title={PyTorch Model Quantization Benchmark},
-  author={Your Name},
-  year={2024},
-  url={https://github.com/your-username/CVQuant}
+  author={t0saki},
+  year={2025},
+  url={https://github.com/t0saki/CVQuant}
 }
 ```
 
