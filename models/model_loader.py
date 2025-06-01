@@ -4,8 +4,10 @@ Model loader for ResNet and MobileNet models
 import torch
 import torch.nn as nn
 import torchvision.models as models
+from torchvision.models.quantization import resnet
 import timm
-from typing import Dict, Any, Optional
+from typing import Dict, Any
+from .quantizable_resnet import resnet50_quantizable, resnet18_quantizable
 
 class ModelLoader:
     """Load and prepare models for quantization experiments"""
@@ -15,6 +17,8 @@ class ModelLoader:
         self.available_models = {
             'resnet18': self._load_resnet18,
             'resnet50': self._load_resnet50,
+            'resnet18_quantizable': self._load_resnet18_quantizable,
+            'resnet50_quantizable': self._load_resnet50_quantizable,
             'mobilenet_v2': self._load_mobilenet_v2,
             'mobilenet_v3_large': self._load_mobilenet_v3_large,
             'mobilenet_v3_small': self._load_mobilenet_v3_small,
@@ -42,16 +46,26 @@ class ModelLoader:
     
     def _load_resnet18(self, pretrained: bool = True) -> nn.Module:
         """Load ResNet-18 model"""
-        model = models.resnet18(pretrained=pretrained)
+        model = resnet.resnet18(pretrained=pretrained)
         if self.num_classes != 1000:
             model.fc = nn.Linear(model.fc.in_features, self.num_classes)
         return model
     
     def _load_resnet50(self, pretrained: bool = True) -> nn.Module:
         """Load ResNet-50 model"""
-        model = models.resnet50(pretrained=pretrained)
+        model = resnet.resnet50(pretrained=pretrained)
         if self.num_classes != 1000:
             model.fc = nn.Linear(model.fc.in_features, self.num_classes)
+        return model
+    
+    def _load_resnet18_quantizable(self, pretrained: bool = True) -> nn.Module:
+        """Load quantizable ResNet-18 model with QuantStub and DeQuantStub"""
+        model = resnet18_quantizable(pretrained=pretrained, num_classes=self.num_classes)
+        return model
+    
+    def _load_resnet50_quantizable(self, pretrained: bool = True) -> nn.Module:
+        """Load quantizable ResNet-50 model with QuantStub and DeQuantStub"""
+        model = resnet50_quantizable(pretrained=pretrained, num_classes=self.num_classes)
         return model
     
     def _load_mobilenet_v2(self, pretrained: bool = True) -> nn.Module:

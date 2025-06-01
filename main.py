@@ -26,9 +26,7 @@ def parse_arguments():
     
     # Model configuration
     parser.add_argument('--model', type=str, default='resnet18',
-                       choices=['resnet18', 'resnet50', 'mobilenet_v2', 'mobilenet_v3_large', 
-                               'mobilenet_v3_small', 'mobilenet_v4_conv_small', 
-                               'mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large'],
+                       choices=['resnet18', 'resnet50', 'resnet18_quantizable', 'resnet50_quantizable', 'mobilenet_v3_small'],
                        help='Model to use for quantization experiments')
     
     # Dataset configuration
@@ -46,7 +44,7 @@ def parse_arguments():
     
     # Quantization configuration
     parser.add_argument('--methods', nargs='+', 
-                       default=['dynamic', 'static', 'fx', 'int8'],
+                       default=['dynamic', 'static', 'int8'],
                        choices=['dynamic', 'static', 'qat', 'fx', 'int8'],
                        help='Quantization methods to benchmark')
     parser.add_argument('--backend', type=str, default='fbgemm',
@@ -84,6 +82,7 @@ def setup_device(device_arg: str) -> torch.device:
     if device.type == 'cuda':
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        print("NOTE: Quantization will run on CPU as PyTorch quantization operations are CPU-only")
     
     return device
 

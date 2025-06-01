@@ -50,9 +50,12 @@ class BaseQuantizer:
         total_loss = 0.0
         criterion = nn.CrossEntropyLoss()
         
+        # Determine if model is quantized (should be on CPU)
+        model_device = next(model.parameters()).device
+        
         with torch.no_grad():
             for inputs, targets in data_loader:
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                inputs, targets = inputs.to(model_device), targets.to(model_device)
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
                 total_loss += loss.item()
@@ -86,6 +89,10 @@ class BaseQuantizer:
             Dictionary with timing statistics
         """
         model.eval()
+        
+        # Move input to the same device as the model
+        model_device = next(model.parameters()).device
+        input_tensor = input_tensor.to(model_device)
         
         # Warmup
         with torch.no_grad():
@@ -167,8 +174,20 @@ class StaticQuantizer(BaseQuantizer):
         model_copy = copy.deepcopy(model)
         model_copy.eval()
         
-        # Set quantization configuration
-        model_copy.qconfig = torch.quantization.get_default_qconfig(self.backend)
+        # Move model to CPU for quantization (PyTorch quantization is CPU-only)
+        model_copy = model_copy.to('cpu')
+        
+        # Set quantization configuration - use per_tensor for compatibility
+        if self.backend == 'fbgemm':
+            # Use per_tensor quantization for better compatibility
+            qconfig = torch.quantization.QConfig(
+                activation=torch.quantization.default_observer,
+                weight=torch.quantization.default_weight_observer
+            )
+        else:
+            qconfig = torch.quantization.get_default_qconfig(self.backend)
+        
+        model_copy.qconfig = qconfig
         
         # Prepare model for quantization
         model_prepared = torch.quantization.prepare(model_copy)
@@ -187,7 +206,7 @@ class StaticQuantizer(BaseQuantizer):
         model.eval()
         with torch.no_grad():
             for inputs, _ in calibration_data:
-                inputs = inputs.to(self.device)
+                inputs = inputs.to('cpu')  # Ensure data is on CPU for quantization
                 model(inputs)
 
 
@@ -382,7 +401,7 @@ class QuantizationBenchmark:
         
         # Evaluate original model
         original_metrics = quantizers['dynamic'].evaluate_model(model, evaluation_data)
-        example_input = next(iter(evaluation_data))[0][:1].to(self.device)
+        example_input = next(iter(evaluation_data))[0][:1]
         original_timing = quantizers['dynamic'].measure_inference_time(model, example_input)
         
         results['original'] = {
