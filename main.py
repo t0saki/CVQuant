@@ -84,6 +84,7 @@ def setup_device(device_arg: str) -> torch.device:
     if device.type == 'cuda':
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        print("NOTE: Quantization will run on CPU as PyTorch quantization operations are CPU-only")
     
     return device
 
