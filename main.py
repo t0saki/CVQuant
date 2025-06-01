@@ -15,7 +15,7 @@ from config import Config
 from models.model_loader import ModelLoader, load_model
 from quantization.quantizers import (
     DynamicQuantizer, StaticQuantizer, QATQuantizer, 
-    FXQuantizer, INT8Quantizer, QuantizationBenchmark
+    FXQuantizer, INT8Quantizer, TorchvisionQuantizer, QuantizationBenchmark
 )
 from utils.data_loader import create_data_loaders, adjust_dataset_for_model
 
@@ -26,9 +26,7 @@ def parse_arguments():
     
     # Model configuration
     parser.add_argument('--model', type=str, default='resnet18',
-                       choices=['resnet18', 'resnet50', 'mobilenet_v2', 'mobilenet_v3_large', 
-                               'mobilenet_v3_small', 'mobilenet_v4_conv_small', 
-                               'mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large'],
+                       choices=['resnet18', 'resnet50', 'mobilenet_v3_small'],
                        help='Model to use for quantization experiments')
     
     # Dataset configuration
@@ -46,8 +44,8 @@ def parse_arguments():
     
     # Quantization configuration
     parser.add_argument('--methods', nargs='+', 
-                       default=['dynamic', 'static', 'fx', 'int8'],
-                       choices=['dynamic', 'static', 'qat', 'fx', 'int8'],
+                       default=['dynamic', 'static', 'int8'],
+                       choices=['dynamic', 'static', 'qat', 'fx', 'int8', 'torchvision'],
                        help='Quantization methods to benchmark')
     parser.add_argument('--backend', type=str, default='fbgemm',
                        choices=['fbgemm', 'qnnpack'],

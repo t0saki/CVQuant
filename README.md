@@ -77,9 +77,7 @@ python main.py \
 ## Available Models
 
 - **ResNet**: `resnet18`, `resnet50`
-- **MobileNet V2**: `mobilenet_v2`
-- **MobileNet V3**: `mobilenet_v3_large`, `mobilenet_v3_small`
-- **MobileNet V4**: `mobilenet_v4_conv_small`, `mobilenet_v4_conv_medium`, `mobilenet_v4_conv_large`
+- **MobileNet V3**: `mobilenet_v3_small`
 
 ## Available Datasets
 
@@ -118,7 +116,7 @@ python main.py \
 
 | Argument | Description | Default | Choices |
 |----------|-------------|---------|---------|
-| `--model` | Model architecture | `resnet18` | `resnet18`, `resnet50`, `mobilenet_v2`, `mobilenet_v3_large`, `mobilenet_v3_small`, `mobilenet_v4_conv_small`, `mobilenet_v4_conv_medium`, `mobilenet_v4_conv_large` |
+| `--model` | Model architecture | `resnet18` | `resnet18`, `resnet50`, `mobilenet_v3_small` |
 | `--dataset` | Dataset to use | `cifar10` | `cifar10`, `cifar100`, `imagenet` |
 | `--methods` | Quantization methods | `['dynamic', 'static', 'fx', 'int8']` | `dynamic`, `static`, `qat`, `fx`, `int8` |
 | `--batch-size` | Batch size | `32` | Any positive integer |
