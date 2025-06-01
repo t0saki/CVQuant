@@ -1,0 +1,3 @@
+*.pyc
+data/
+quantization_results*.json
