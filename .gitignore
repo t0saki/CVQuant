@@ -1,3 +1,4 @@
 *.pyc
 data/
 quantization_results*.json
+fine_tuned_weights
