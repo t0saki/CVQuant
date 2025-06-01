@@ -162,8 +162,8 @@ class ModelLoader:
             print(f"Warning: Could not load MobileNet V4 ConvLarge: {e}")
             print("Falling back to MobileNet V3 Large")
             return self._load_mobilenet_v3_large(pretrained)
-    
-    def get_model_info(self, model: nn.Module) -> Dict[str, Any]:
+
+    def get_model_info(self, model: nn.Module, bytes: int = 4) -> Dict[str, Any]:
         """
         Get information about a model
         
@@ -179,7 +179,7 @@ class ModelLoader:
         return {
             'total_parameters': total_params,
             'trainable_parameters': trainable_params,
-            'model_size_mb': total_params * 4 / (1024 * 1024),  # Assuming float32
+            'model_size_mb': total_params * bytes / (1024 * 1024),  # Assuming float32
         }
     
     def prepare_model_for_quantization(self, model: nn.Module, method: str) -> nn.Module:
