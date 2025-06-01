@@ -121,7 +121,7 @@ class DynamicQuantizer(BaseQuantizer):
     
     def __init__(self, device: torch.device = None, qconfig_spec: Dict = None):
         super().__init__(device)
-        self.qconfig_spec = qconfig_spec or {nn.Linear, nn.Conv2d}
+        self.qconfig_spec = qconfig_spec or {nn.Linear, nn.Conv2d}  # nn.LSTM, nn.GRU, etc. can also be added
     
     def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader = None) -> nn.Module:
         """
@@ -136,6 +136,10 @@ class DynamicQuantizer(BaseQuantizer):
         """
         self.original_model = copy.deepcopy(model)
         model_copy = copy.deepcopy(model)
+        
+        # Move model to CPU for dynamic quantization (PyTorch dynamic quantization is CPU-only)
+        model_copy = model_copy.to('cpu')
+        model_copy.eval() # Ensure model is in eval mode for dynamic quantization
         
         # Apply dynamic quantization
         quantized_model = torch.quantization.quantize_dynamic(
@@ -154,106 +158,111 @@ class StaticQuantizer(BaseQuantizer):
     def __init__(self, device: torch.device = None, backend: str = 'fbgemm'):
         super().__init__(device)
         self.backend = backend
-        torch.backends.quantized.engine = backend
     
     def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader) -> nn.Module:
         """
-        Apply static quantization to the model
-        
-        Args:
-            model: Original model to quantize
-            calibration_data: Calibration data loader
-            
-        Returns:
-            Statically quantized model
+        Apply static quantization to the model.
+        This involves preparing the model, calibrating with data, and converting.
         """
-        if calibration_data is None:
-            raise ValueError("Calibration data is required for static quantization")
-        
         self.original_model = copy.deepcopy(model)
-        model_copy = copy.deepcopy(model)
-        model_copy.eval()
+        model_to_quantize = copy.deepcopy(model)
+
+        model_to_quantize.to('cpu').eval() # Static quantization preparation is typically on CPU and in eval mode
+
+        torch.backends.quantized.engine = self.backend
+
+        model_to_quantize.qconfig = torch.quantization.get_default_qconfig(self.backend)
         
-        # Move model to CPU for quantization (PyTorch quantization is CPU-only)
-        model_copy = model_copy.to('cpu')
+        if hasattr(model_to_quantize, 'fuse_model') and callable(model_to_quantize.fuse_model):
+            print(f"StaticQuant: Calling model.fuse_model() before prepare.")
+            model_to_quantize.fuse_model()
+        # else:
+            # print(f"StaticQuant: model.fuse_model() not found. Consider manual fusion if needed.")
+
+        print(f"StaticQuant: Preparing model with backend {self.backend}.")
+        torch.quantization.prepare(model_to_quantize, inplace=True)
+
+        print("StaticQuant: Calibrating model...")
+        self._calibrate(model_to_quantize, calibration_data)
+
+        print("StaticQuant: Converting model...")
+        quantized_model = torch.quantization.convert(model_to_quantize, inplace=True)
         
-        # Set quantization configuration - use per_tensor for compatibility
-        if self.backend == 'fbgemm':
-            # Use per_tensor quantization for better compatibility
-            qconfig = torch.quantization.QConfig(
-                activation=torch.quantization.default_observer,
-                weight=torch.quantization.default_weight_observer
-            )
-        else:
-            qconfig = torch.quantization.get_default_qconfig(self.backend)
-        
-        model_copy.qconfig = qconfig
-        
-        # Prepare model for quantization
-        model_prepared = torch.quantization.prepare(model_copy)
-        
-        # Calibrate with calibration data
-        self._calibrate(model_prepared, calibration_data)
-        
-        # Convert to quantized model
-        quantized_model = torch.quantization.convert(model_prepared)
-        
+        quantized_model.to(self.device) # Move final model to target device
+
         self.quantized_model = quantized_model
-        return quantized_model
+        return self.quantized_model
     
     def _calibrate(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader):
-        """Calibrate the model with calibration data"""
         model.eval()
+        model.to('cpu') # Ensure model and data are on CPU for calibration
         with torch.no_grad():
             for inputs, _ in calibration_data:
-                inputs = inputs.to('cpu')  # Ensure data is on CPU for quantization
+                inputs = inputs.to('cpu')
                 model(inputs)
+        print("StaticQuant: Calibration finished.")
 
 
 class QATQuantizer(BaseQuantizer):
     """Quantization Aware Training implementation"""
     
-    def __init__(self, device: torch.device = None, backend: str = 'fbgemm'):
+    def __init__(self, device: torch.device = None, backend: str = 'fbgemm',
+                 train_epochs: int = 10, lr: float = 1e-4):
         super().__init__(device)
         self.backend = backend
-        torch.backends.quantized.engine = backend
+        self.train_epochs = train_epochs
+        self.lr = lr
     
-    def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader = None) -> nn.Module:
+    def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader) -> nn.Module:
         """
-        Prepare model for QAT (does not include actual training)
-        
-        Args:
-            model: Original model to quantize
-            calibration_data: Not used for QAT preparation
-            
-        Returns:
-            Model prepared for QAT
+        Apply Quantization Aware Training (QAT) to the model.
+        Involves preparing for QAT, fine-tuning, and converting to a quantized model.
         """
         self.original_model = copy.deepcopy(model)
-        model_copy = copy.deepcopy(model)
-        
-        # Set QAT quantization configuration
-        model_copy.qconfig = torch.quantization.get_default_qat_qconfig(self.backend)
-        
-        # Prepare model for QAT
-        model_prepared = torch.quantization.prepare_qat(model_copy)
-        
-        self.quantized_model = model_prepared
-        return model_prepared
-    
-    def convert_qat_model(self, qat_model: nn.Module) -> nn.Module:
-        """
-        Convert QAT model to quantized model
-        
-        Args:
-            qat_model: QAT trained model
-            
-        Returns:
-            Quantized model
-        """
-        qat_model.eval()
-        quantized_model = torch.quantization.convert(qat_model)
-        return quantized_model
+        model_to_quantize = copy.deepcopy(model)
+
+        model_to_quantize.to(self.device) # QAT training happens on the target device
+        model_to_quantize.train()
+
+        torch.backends.quantized.engine = self.backend
+        qconfig = torch.quantization.get_default_qat_qconfig(self.backend)
+        model_to_quantize.qconfig = qconfig
+
+        if hasattr(model_to_quantize, 'fuse_model') and callable(model_to_quantize.fuse_model):
+            print(f"QAT: Calling model.fuse_model() before prepare_qat.")
+            model_to_quantize.fuse_model()
+        # else:
+            # print(f"QAT: model.fuse_model() not found. Proceeding with prepare_qat.")
+
+        print(f"QAT: Preparing model for QAT with backend {self.backend}.")
+        model_prepared = torch.quantization.prepare_qat(model_to_quantize)
+
+        optimizer = torch.optim.Adam(model_prepared.parameters(), lr=self.lr)
+        criterion = nn.CrossEntropyLoss()
+
+        print(f"QAT: Starting fine-tuning for {self.train_epochs} epochs with LR {self.lr}.")
+        for epoch in range(self.train_epochs):
+            epoch_loss = 0.0
+            num_batches = 0
+            for inputs, targets in calibration_data:
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                optimizer.zero_grad()
+                outputs = model_prepared(inputs)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+                num_batches += 1
+            avg_epoch_loss = epoch_loss / num_batches if num_batches > 0 else 0.0
+            print(f"QAT Epoch {epoch + 1}/{self.train_epochs} - Avg Loss: {avg_epoch_loss:.4f}")
+
+        model_prepared.eval()
+        quantized_model = torch.quantization.convert(model_prepared.to('cpu')) # Convert on CPU
+        quantized_model.to(self.device) # Move final model to target device
+
+        self.quantized_model = quantized_model
+        print("QAT: Model quantization and conversion complete.")
+        return self.quantized_model
 
 
 class FXQuantizer(BaseQuantizer):
@@ -262,52 +271,55 @@ class FXQuantizer(BaseQuantizer):
     def __init__(self, device: torch.device = None, backend: str = 'fbgemm'):
         super().__init__(device)
         self.backend = backend
-        torch.backends.quantized.engine = backend
     
     def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader) -> nn.Module:
         """
-        Apply FX graph mode quantization to the model
-        
-        Args:
-            model: Original model to quantize
-            calibration_data: Calibration data loader
-            
-        Returns:
-            FX quantized model
+        Apply FX Graph Mode quantization.
+        Requires the model to be FX traceable.
         """
-        if calibration_data is None:
-            raise ValueError("Calibration data is required for FX quantization")
-        
         self.original_model = copy.deepcopy(model)
-        model_copy = copy.deepcopy(model)
-        model_copy.eval()
+        model_to_quantize = copy.deepcopy(model)
+
+        model_to_quantize.to('cpu').eval() # FX quantization is typically done on CPU
+
+        torch.backends.quantized.engine = self.backend
         
-        # Create qconfig mapping
         qconfig = torch.quantization.get_default_qconfig(self.backend)
         qconfig_mapping = torch.quantization.QConfigMapping().set_global(qconfig)
         
-        # Get example input
-        example_inputs = next(iter(calibration_data))[0][:1].to(self.device)
+        print(f"FXQuant: Preparing model with backend {self.backend}.")
+        try:
+            # Ensure there's at least one batch in calibration_data
+            if not calibration_data:
+                raise ValueError("Calibration data loader is empty or None, cannot get example_inputs for FX.")
+            
+            example_inputs = torch.randn(1, *next(iter(calibration_data))[0].shape[1:]).to('cpu')
+            prepared_model = prepare_fx(model_to_quantize, qconfig_mapping, example_inputs)
+        except Exception as e:
+            print(f"FXQuant: Error during prepare_fx. Model might not be FX traceable: {e}")
+            print("FXQuant: Falling back to Eager Mode Static Quantization for this model.")
+            eager_static_quantizer = StaticQuantizer(device=self.device, backend=self.backend)
+            return eager_static_quantizer.quantize(model, calibration_data)
+
+        print("FXQuant: Calibrating model...")
+        self._calibrate(prepared_model, calibration_data)
+
+        print("FXQuant: Converting model...")
+        quantized_model = convert_fx(prepared_model)
         
-        # Prepare model for quantization
-        model_prepared = prepare_fx(model_copy, qconfig_mapping, example_inputs)
-        
-        # Calibrate with calibration data
-        self._calibrate(model_prepared, calibration_data)
-        
-        # Convert to quantized model
-        quantized_model = convert_fx(model_prepared)
-        
+        quantized_model.to(self.device) # Move final model to target device
+
         self.quantized_model = quantized_model
-        return quantized_model
+        return self.quantized_model
     
     def _calibrate(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader):
-        """Calibrate the model with calibration data"""
         model.eval()
+        model.to('cpu')
         with torch.no_grad():
             for inputs, _ in calibration_data:
-                inputs = inputs.to(self.device)
+                inputs = inputs.to('cpu')
                 model(inputs)
+        print("FXQuant: Calibration finished.")
 
 
 class INT8Quantizer(BaseQuantizer):

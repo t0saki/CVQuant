@@ -25,7 +25,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='Quantization experiments for ResNet and MobileNet models')
     
     # Model configuration
-    parser.add_argument('--model', type=str, default='resnet18',
+    parser.add_argument('--model', type=str, default='resnet18_quantizable',
                        choices=['resnet18', 'resnet50', 'resnet18_quantizable', 'resnet50_quantizable', 'mobilenet_v3_small'],
                        help='Model to use for quantization experiments')
     
@@ -44,7 +44,7 @@ def parse_arguments():
     
     # Quantization configuration
     parser.add_argument('--methods', nargs='+', 
-                       default=['dynamic', 'static', 'int8'],
+                       default=['dynamic', 'static'],
                        choices=['dynamic', 'static', 'qat', 'fx', 'int8'],
                        help='Quantization methods to benchmark')
     parser.add_argument('--backend', type=str, default='fbgemm',
