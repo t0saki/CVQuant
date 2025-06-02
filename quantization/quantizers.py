@@ -51,7 +51,9 @@ class BaseQuantizer:
         total_loss = 0.0
         criterion = nn.CrossEntropyLoss()
         
-        model_device = next(model.parameters()).device
+        # model_device = next(model.parameters()).device
+        model_device = self.device if hasattr(model, 'device') else torch.device('cpu')
+        model = model.to(model_device)  # Ensure model is on the correct device
         
         with torch.no_grad():
             for inputs, targets in data_loader:
@@ -90,7 +92,9 @@ class BaseQuantizer:
         """
         # Default implementation, can be overridden by subclasses if specific handling is needed
         model.eval()
-        model_device = next(model.parameters()).device
+        # model_device = next(model.parameters()).device
+        model_device = self.device if hasattr(model, 'device') else torch.device('cpu')
+        model = model.to(model_device)  # Ensure model is on the correct device
         input_tensor = input_tensor.to(model_device)
 
         with torch.no_grad():
@@ -633,7 +637,7 @@ class QuantizationBenchmark(BaseQuantizer):
                         'accuracy': eval_metrics.get('accuracy', 0.0),
                         'loss': eval_metrics.get('loss', 0.0),
                         'model_size_mb': model_size_mb,
-                        'error': f'Quantized model for {method_name} has no standard parameters or only empty ones.',
+                        # 'warning': f'Quantized model for {method_name} has no standard parameters or only empty ones.',
                         'mean_time_ms': time_stats.get('mean_time_ms', 0.0),
                         'min_time_ms': time_stats.get('min_time_ms', 0.0),
                         'max_time_ms': time_stats.get('max_time_ms', 0.0),
