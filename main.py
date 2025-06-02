@@ -67,9 +67,9 @@ def parse_arguments():
                        help='Device to use for experiments')
     
     # Benchmark configuration
-    parser.add_argument('--warmup-iterations', type=int, default=10,
+    parser.add_argument('--warmup-iterations', type=int, default=50,
                        help='Number of warmup iterations for timing')
-    parser.add_argument('--benchmark-iterations', type=int, default=100,
+    parser.add_argument('--benchmark-iterations', type=int, default=500,
                        help='Number of benchmark iterations for timing')
     
     return parser.parse_args()

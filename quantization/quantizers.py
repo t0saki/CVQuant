@@ -4,8 +4,10 @@ Quantization methods implementation for PyTorch models
 import torch
 import torch.nn as nn
 import copy
-import time # Added time for inference measurement
+import time
 import torch.optim as optim
+import tempfile  # Added import
+import traceback # Added import
 from torch.quantization import QConfig, default_observer, default_weight_observer, get_default_qat_qconfig
 from torch.quantization.quantize_fx import prepare_fx, convert_fx, prepare_qat_fx
 from torch.ao.quantization.qconfig_mapping import QConfigMapping
@@ -73,7 +75,7 @@ class BaseQuantizer:
         }
     
     def measure_inference_time(self, model: nn.Module, input_tensor: torch.Tensor, 
-                             warmup_iterations: int = 10, benchmark_iterations: int = 100) -> Dict[str, float]:
+                             warmup_iterations: int = 50, benchmark_iterations: int = 500) -> Dict[str, float]:
         """
         Measure model inference time
         
@@ -205,7 +207,7 @@ class DynamicQuantizer(BaseQuantizer):
         }
     
     def measure_inference_time(self, model: nn.Module, input_tensor: torch.Tensor, 
-                             warmup_iterations: int = 10, benchmark_iterations: int = 100) -> Dict[str, float]:
+                             warmup_iterations: int = 50, benchmark_iterations: int = 500) -> Dict[str, float]:
         """
         Measure model inference time for dynamic quantized models
         
@@ -524,6 +526,7 @@ class QuantizationBenchmark(BaseQuantizer):
     """Benchmark different quantization methods"""
     
     def __init__(self, device: torch.device = None, backend: str = 'fbgemm'): # Added backend
+        super().__init__(device) # Call super init if it's inheriting
         self.device = device or torch.device('cpu')
         self.backend = backend # Store backend
         self.results = {}
@@ -547,8 +550,7 @@ class QuantizationBenchmark(BaseQuantizer):
             A dictionary containing benchmark results for each method.
         """
         self.results = {}
-        # original_model_size = model.get_model_info().get('size_mb', 0.0) # Get original model size in MB
-        original_model_size = 1 # TODO: Implement a method to get the model size in MB
+        original_model_size = self._get_model_size(model) # Correctly get original model size
         
         # Get an example input tensor for inference time measurement
         # Ensure evaluation_data is not empty and yields (inputs, targets) or just inputs
@@ -572,10 +574,10 @@ class QuantizationBenchmark(BaseQuantizer):
         # Evaluate original model
         print("\nEvaluating original model...")
         if example_input is not None:
-            original_time_stats = self.measure_inference_time(model, example_input.to(self.device)) # Original model on self.device
+            original_time_stats = self.measure_inference_time(model.to(self.device), example_input.to(self.device))
         else:
             original_time_stats = {k: 0 for k in ['mean_time_ms', 'min_time_ms', 'max_time_ms', 'std_time_ms']}
-        original_eval_metrics = self.evaluate_model(model.to(self.device), evaluation_data) # Original model on self.device
+        original_eval_metrics = self.evaluate_model(model.to(self.device), evaluation_data)
         
         self.results['original'] = {
             'accuracy': original_eval_metrics.get('accuracy', 0.0),
@@ -601,42 +603,91 @@ class QuantizationBenchmark(BaseQuantizer):
             
             try:
                 # Quantize model
-                # For QAT, calibration_data is training data. For others, it's for calibration.
                 quantized_model = quantizer.quantize(copy.deepcopy(model), calibration_data)
                 
-                # Evaluate quantized model
-                # Quantized models are typically on CPU after conversion
-                quantized_model_device = next(quantized_model.parameters()).device
+                # Check if the quantized model has parameters
+                params = list(quantized_model.parameters())
+                if not params or not any(p.numel() > 0 for p in params): # Check if parameters exist and are not all empty
+                    print(f"Warning: Quantized model for {method_name} has no parameters or only empty parameters after conversion.")
+                    # Fallback to evaluating the model as is, assuming it might be a graph or a different structure
+                    # that doesn't rely on standard nn.Module parameters in the same way.
+                    eval_metrics = quantizer.evaluate_model(quantized_model, evaluation_data)
+                    
+                    if example_input is not None:
+                        # Ensure the input tensor is on the correct device for the quantized_model
+                        # This is a bit tricky if the model has no parameters to infer device from.
+                        # We'll try to use the quantizer's device or fall back to original model's device.
+                        try:
+                            # Attempt to get device from model if it has a device attribute (e.g. for FX graphs)
+                            q_device = quantized_model.device if hasattr(quantized_model, 'device') else quantizer.device
+                        except AttributeError:
+                            q_device = quantizer.device # Fallback to quantizer's device
+                        
+                        time_stats = quantizer.measure_inference_time(quantized_model, example_input.to(q_device))
+                    else:
+                        time_stats = {k: 0 for k in ['mean_time_ms', 'min_time_ms', 'max_time_ms', 'std_time_ms']}
+                    
+                    model_size_mb = self._get_model_size(quantized_model) # This might return 0 if it relies on parameters
+
+                    self.results[method_name] = {
+                        'accuracy': eval_metrics.get('accuracy', 0.0),
+                        'loss': eval_metrics.get('loss', 0.0),
+                        'model_size_mb': model_size_mb,
+                        'error': f'Quantized model for {method_name} has no standard parameters or only empty ones.',
+                        'mean_time_ms': time_stats.get('mean_time_ms', 0.0),
+                        'min_time_ms': time_stats.get('min_time_ms', 0.0),
+                        'max_time_ms': time_stats.get('max_time_ms', 0.0),
+                        'std_time_ms': time_stats.get('std_time_ms', 0.0),
+                        'speedup': 0.0, 
+                        'compression_ratio': 0.0
+                    }
+                    print(f"Type of problematic quantized_model: {type(quantized_model)}")
+                    print(f"{method_name.capitalize()} Quantized Model (no params) - Accuracy: {self.results[method_name]['accuracy']:.2f}%, "
+                          f"Size: {model_size_mb:.2f}MB, "
+                          f"Inference Time: {time_stats.get('mean_time_ms', 0.0):.2f}ms")
+                    continue
+
+                quantized_model_device = params[0].device
                 print(f"Evaluating {method_name} quantized model on device: {quantized_model_device}")
-                eval_metrics = quantizer.evaluate_model(quantized_model, evaluation_data) # Use quantizer's eval
+                eval_metrics = quantizer.evaluate_model(quantized_model, evaluation_data)
                 
-                # Measure inference time
                 if example_input is not None:
-                    # Ensure example_input is on the same device as the quantized_model for timing
                     time_stats = quantizer.measure_inference_time(quantized_model, example_input.to(quantized_model_device))
                 else:
                     time_stats = {k: 0 for k in ['mean_time_ms', 'min_time_ms', 'max_time_ms', 'std_time_ms']}
 
                 model_size_mb = self._get_model_size(quantized_model)
                 
+                # Calculate speedup and compression
+                original_mean_time = self.results.get('original', {}).get('mean_time_ms', 0.0)
+                current_mean_time = time_stats.get('mean_time_ms', float('inf')) # Avoid division by zero if current_mean_time is 0
+                speedup_ratio = original_mean_time / current_mean_time if current_mean_time > 0 and original_mean_time > 0 else 0.0
+
+                original_size = self.results.get('original', {}).get('model_size_mb', 0.0)
+                compression_ratio_val = original_size / model_size_mb if model_size_mb > 0 and original_size > 0 else 0.0
+                
                 self.results[method_name] = {
                     'accuracy': eval_metrics.get('accuracy', 0.0),
                     'loss': eval_metrics.get('loss', 0.0),
                     'model_size_mb': model_size_mb,
-                    'size_reduction_ratio': original_model_size / model_size_mb if model_size_mb > 0 else float('inf'),
+                    'compression_ratio': compression_ratio_val,
+                    'speedup': speedup_ratio,
                     **time_stats
                 }
                 print(f"{method_name.capitalize()} Quantized Model - Accuracy: {self.results[method_name]['accuracy']:.2f}%, "
                       f"Size: {model_size_mb:.2f}MB, "
-                      f"Inference Time: {time_stats.get('mean_time_ms', 0.0):.2f}ms")
+                      f"Inference Time: {time_stats.get('mean_time_ms', 0.0):.2f}ms, "
+                      f"Speedup: {speedup_ratio:.2f}x, "
+                      f"Compression: {compression_ratio_val:.2f}x")
 
             except Exception as e:
                 print(f"Error benchmarking {method_name}: {e}")
-                import traceback
                 traceback.print_exc()
                 self.results[method_name] = {
                     'accuracy': 0.0, 'loss': 0.0, 'model_size_mb': 0.0, 
-                    'error': str(e)
+                    'error': str(e),
+                    'mean_time_ms': 0.0, 'min_time_ms': 0.0, 'max_time_ms': 0.0, 'std_time_ms': 0.0, # Ensure keys exist
+                    'speedup': 0.0, 'compression_ratio': 0.0
                 }
         
         return self.results
@@ -664,30 +715,31 @@ class QuantizationBenchmark(BaseQuantizer):
             print("No results to display. Run benchmark_quantization_methods first.")
             return
         
-        print("\n" + "="*80)
+        print("\n" + "="*100) # Increased width for new columns
         print("QUANTIZATION BENCHMARK RESULTS")
-        print("="*80)
+        print("="*100)
         print(f"{'Method':<12} {'Accuracy':<10} {'Loss':<8} {'Time(ms)':<10} {'Size(MB)':<10} {'Speedup':<8} {'Compression':<12}")
-        print("-"*80)
+        print("-"*100)
         
-        for method, results in self.results.items():
-            if 'error' in results:
-                print(f"{method:<12} ERROR: {results['error']}")
+        for method, res_data in self.results.items(): # Renamed results to res_data to avoid conflict
+            if 'error' in res_data and res_data['error']: # Check if error is not None or empty
+                print(f"{method:<12} ERROR: {res_data['error']}")
                 continue
                 
-            accuracy = f"{results['accuracy']:.2f}%"
-            loss = f"{results['loss']:.4f}"
-            time_ms = f"{results['inference_time_ms']:.2f}"
-            size_mb = f"{results['model_size_mb']:.2f}"
+            accuracy = f"{res_data.get('accuracy', 0.0):.2f}%"
+            loss = f"{res_data.get('loss', 0.0):.4f}"
+            time_ms = f"{res_data.get('mean_time_ms', 0.0):.2f}" # Use mean_time_ms
+            size_mb = f"{res_data.get('model_size_mb', 0.0):.2f}"
             
             if method == 'original':
                 speedup = "1.00x"
                 compression = "1.00x"
             else:
-                speedup = f"{results.get('speedup', 0):.2f}x"
-                compression = f"{results.get('compression_ratio', 0):.2f}x"
+                speedup = f"{res_data.get('speedup', 0.0):.2f}x"
+                compression = f"{res_data.get('compression_ratio', 0.0):.2f}x"
             
             print(f"{method:<12} {accuracy:<10} {loss:<8} {time_ms:<10} {size_mb:<10} {speedup:<8} {compression:<12}")
+        print("="*100)
 
 def get_available_quantizers(backend: str = 'fbgemm', device: torch.device = None) -> Dict[str, BaseQuantizer]: # Added backend and device
     """Get dictionary of available quantizers"""
