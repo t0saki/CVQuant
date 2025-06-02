@@ -25,10 +25,8 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='Quantization experiments for ResNet and MobileNet models')
     
     # Model configuration
-    parser.add_argument('--model', type=str, default='resnet18',
-                       choices=['resnet18', 'resnet50', 'mobilenet_v2', 'mobilenet_v3_large', 
-                               'mobilenet_v3_small', 'mobilenet_v4_conv_small', 
-                               'mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large'],
+    parser.add_argument('--model', type=str, default='resnet18_quantizable',
+                       choices=['resnet18', 'resnet50', 'resnet18_quantizable', 'resnet50_quantizable', 'mobilenet_v3_small'],
                        help='Model to use for quantization experiments')
     
     # Dataset configuration
@@ -46,7 +44,7 @@ def parse_arguments():
     
     # Quantization configuration
     parser.add_argument('--methods', nargs='+', 
-                       default=['dynamic', 'static', 'fx', 'int8'],
+                       default=['dynamic', 'static'],
                        choices=['dynamic', 'static', 'qat', 'fx', 'int8'],
                        help='Quantization methods to benchmark')
     parser.add_argument('--backend', type=str, default='fbgemm',
@@ -60,14 +58,18 @@ def parse_arguments():
                        help='Save quantized models')
     parser.add_argument('--plot-results', action='store_true',
                        help='Generate result plots')
+    parser.add_argument('--enable-finetuning', action='store_true', default=True,
+                       help='Enable automatic fine-tuning for dataset-specific weights')
+    parser.add_argument('--disable-finetuning', action='store_true',
+                       help='Disable fine-tuning and use only pretrained weights')
     parser.add_argument('--device', type=str, default='auto',
                        choices=['auto', 'cpu', 'cuda'],
                        help='Device to use for experiments')
     
     # Benchmark configuration
-    parser.add_argument('--warmup-iterations', type=int, default=10,
+    parser.add_argument('--warmup-iterations', type=int, default=50,
                        help='Number of warmup iterations for timing')
-    parser.add_argument('--benchmark-iterations', type=int, default=100,
+    parser.add_argument('--benchmark-iterations', type=int, default=500,
                        help='Number of benchmark iterations for timing')
     
     return parser.parse_args()
@@ -84,20 +86,28 @@ def setup_device(device_arg: str) -> torch.device:
     if device.type == 'cuda':
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        print("NOTE: Quantization will run on CPU as PyTorch quantization operations are CPU-only")
     
     return device
 
 
-def load_and_prepare_model(model_name: str, dataset_name: str, device: torch.device) -> nn.Module:
-    """Load and prepare model for quantization"""
+def load_and_prepare_model(model_name: str, dataset_name: str, device: torch.device, 
+                          enable_finetuning: bool = True) -> nn.Module:
+    """Load and prepare model for quantization with optional fine-tuning"""
     print(f"\nLoading model: {model_name}")
     
     # Adjust dataset and get number of classes
     dataset_name, num_classes = adjust_dataset_for_model(dataset_name, model_name)
     
-    # Load model
-    model_loader = ModelLoader(num_classes=num_classes)
-    model = model_loader.load_model(model_name, pretrained=True)
+    # Load model with fine-tuning support
+    model_loader = ModelLoader(num_classes=num_classes, device=device, enable_finetuning=enable_finetuning)
+    
+    if enable_finetuning:
+        print(f"Fine-tuning enabled for dataset: {dataset_name}")
+        model = model_loader.load_model(model_name, pretrained=True, dataset_name=dataset_name, auto_finetune=True)
+    else:
+        model = model_loader.load_model(model_name, pretrained=True)
+    
     model = model.to(device)
     model.eval()
     
@@ -287,8 +297,9 @@ def main():
     print("="*60)
     
     try:
-        # Load and prepare model
-        model = load_and_prepare_model(args.model, args.dataset, device)
+        # Load and prepare model with optional fine-tuning
+        enable_finetuning = args.enable_finetuning and not args.disable_finetuning
+        model = load_and_prepare_model(args.model, args.dataset, device, enable_finetuning)
         
         # Load data
         print(f"\nLoading dataset: {args.dataset}")

@@ -3,14 +3,15 @@ Quantization methods implementation for PyTorch models
 """
 import torch
 import torch.nn as nn
-import torch.quantization as quant
-from torch.quantization import QConfig, default_observer, default_weight_observer
-from torch.quantization.quantize_fx import prepare_fx, convert_fx
 import copy
-from typing import Dict, Any, Callable, Optional, Tuple
 import time
-import os
-
+import torch.optim as optim
+import tempfile  # Added import
+import traceback # Added import
+from torch.quantization import QConfig, default_observer, default_weight_observer, get_default_qat_qconfig
+from torch.quantization.quantize_fx import prepare_fx, convert_fx, prepare_qat_fx
+from torch.ao.quantization.qconfig_mapping import QConfigMapping
+from typing import Dict, Any, Callable, Optional, Tuple
 
 class BaseQuantizer:
     """Base class for all quantization methods"""
@@ -26,7 +27,7 @@ class BaseQuantizer:
         
         Args:
             model: Original model to quantize
-            calibration_data: Calibration data loader for static quantization
+            calibration_data: Calibration data loader for static quantization or training data for QAT
             
         Returns:
             Quantized model
@@ -50,19 +51,23 @@ class BaseQuantizer:
         total_loss = 0.0
         criterion = nn.CrossEntropyLoss()
         
+        # model_device = next(model.parameters()).device
+        model_device = self.device if hasattr(model, 'device') else torch.device('cpu')
+        model = model.to(model_device)  # Ensure model is on the correct device
+        
         with torch.no_grad():
             for inputs, targets in data_loader:
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                inputs, targets = inputs.to(model_device), targets.to(model_device)
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
-                total_loss += loss.item()
+                total_loss += loss.item() * inputs.size(0) # Accumulate total loss correctly
                 
                 _, predicted = outputs.max(1)
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
         
-        accuracy = 100. * correct / total
-        avg_loss = total_loss / len(data_loader)
+        accuracy = 100. * correct / total if total > 0 else 0.0
+        avg_loss = total_loss / total if total > 0 else 0.0 # Calculate average loss correctly
         
         return {
             'accuracy': accuracy,
@@ -72,7 +77,7 @@ class BaseQuantizer:
         }
     
     def measure_inference_time(self, model: nn.Module, input_tensor: torch.Tensor, 
-                             warmup_iterations: int = 10, benchmark_iterations: int = 100) -> Dict[str, float]:
+                             warmup_iterations: int = 50, benchmark_iterations: int = 500) -> Dict[str, float]:
         """
         Measure model inference time
         
@@ -85,27 +90,47 @@ class BaseQuantizer:
         Returns:
             Dictionary with timing statistics
         """
+        # Default implementation, can be overridden by subclasses if specific handling is needed
         model.eval()
-        
-        # Warmup
+        # model_device = next(model.parameters()).device
+        model_device = self.device if hasattr(model, 'device') else torch.device('cpu')
+        model = model.to(model_device)  # Ensure model is on the correct device
+        input_tensor = input_tensor.to(model_device)
+
         with torch.no_grad():
             for _ in range(warmup_iterations):
                 _ = model(input_tensor)
         
-        # Benchmark
         times = []
         with torch.no_grad():
             for _ in range(benchmark_iterations):
+                # Ensure synchronization for accurate timing on CUDA devices
+                if model_device.type == 'cuda':
+                    torch.cuda.synchronize()
                 start_time = time.time()
+                
                 _ = model(input_tensor)
+                
+                if model_device.type == 'cuda':
+                    torch.cuda.synchronize()
                 end_time = time.time()
                 times.append((end_time - start_time) * 1000)  # Convert to milliseconds
         
+        if not times: # Handle case with zero benchmark_iterations
+            return {
+                'mean_time_ms': 0.0,
+                'min_time_ms': 0.0,
+                'max_time_ms': 0.0,
+                'std_time_ms': 0.0
+            }
+
+        mean_time = sum(times) / len(times)
+        std_time = (sum([(t - mean_time)**2 for t in times]) / len(times))**0.5 if len(times) > 1 else 0.0
         return {
-            'mean_time_ms': sum(times) / len(times),
+            'mean_time_ms': mean_time,
             'min_time_ms': min(times),
             'max_time_ms': max(times),
-            'std_time_ms': (sum([(t - sum(times)/len(times))**2 for t in times]) / len(times))**0.5
+            'std_time_ms': std_time
         }
 
 
@@ -130,6 +155,9 @@ class DynamicQuantizer(BaseQuantizer):
         self.original_model = copy.deepcopy(model)
         model_copy = copy.deepcopy(model)
         
+        # Move model to CPU for dynamic quantization (PyTorch dynamic quantization is CPU-only)
+        model_copy = model_copy.to('cpu')
+        
         # Apply dynamic quantization
         quantized_model = torch.quantization.quantize_dynamic(
             model_copy,
@@ -139,6 +167,89 @@ class DynamicQuantizer(BaseQuantizer):
         
         self.quantized_model = quantized_model
         return quantized_model
+    
+    def evaluate_model(self, model: nn.Module, data_loader: torch.utils.data.DataLoader) -> Dict[str, float]:
+        """
+        Evaluate model performance for dynamic quantized models
+        
+        Args:
+            model: Model to evaluate (should be on CPU for dynamic quantization)
+            data_loader: Data loader for evaluation
+            
+        Returns:
+            Dictionary with evaluation metrics
+        """
+        model.eval()
+        correct = 0
+        total = 0
+        total_loss = 0.0
+        criterion = nn.CrossEntropyLoss()
+        
+        # Ensure model is on CPU for dynamic quantization evaluation
+        model = model.to('cpu')
+        
+        with torch.no_grad():
+            for inputs, targets in data_loader:
+                # Move data to CPU for dynamic quantized model evaluation
+                inputs, targets = inputs.to('cpu'), targets.to('cpu')
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                total_loss += loss.item()
+                
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+        
+        accuracy = 100. * correct / total
+        avg_loss = total_loss / len(data_loader)
+        
+        return {
+            'accuracy': accuracy,
+            'loss': avg_loss,
+            'correct': correct,
+            'total': total
+        }
+    
+    def measure_inference_time(self, model: nn.Module, input_tensor: torch.Tensor, 
+                             warmup_iterations: int = 50, benchmark_iterations: int = 500) -> Dict[str, float]:
+        """
+        Measure model inference time for dynamic quantized models
+        
+        Args:
+            model: Model to benchmark (should be on CPU for dynamic quantization)
+            input_tensor: Input tensor for inference
+            warmup_iterations: Number of warmup iterations
+            benchmark_iterations: Number of benchmark iterations
+            
+        Returns:
+            Dictionary with timing statistics
+        """
+        model.eval()
+        
+        # Ensure model and input are on CPU for dynamic quantization
+        model = model.to('cpu')
+        input_tensor = input_tensor.to('cpu')
+        
+        # Warmup
+        with torch.no_grad():
+            for _ in range(warmup_iterations):
+                _ = model(input_tensor)
+        
+        # Benchmark
+        times = []
+        with torch.no_grad():
+            for _ in range(benchmark_iterations):
+                start_time = time.time()
+                _ = model(input_tensor)
+                end_time = time.time()
+                times.append((end_time - start_time) * 1000)  # Convert to milliseconds
+        
+        return {
+            'mean_time_ms': sum(times) / len(times),
+            'min_time_ms': min(times),
+            'max_time_ms': max(times),
+            'std_time_ms': (sum([(t - sum(times)/len(times))**2 for t in times]) / len(times))**0.5
+        }
 
 
 class StaticQuantizer(BaseQuantizer):
@@ -167,8 +278,20 @@ class StaticQuantizer(BaseQuantizer):
         model_copy = copy.deepcopy(model)
         model_copy.eval()
         
-        # Set quantization configuration
-        model_copy.qconfig = torch.quantization.get_default_qconfig(self.backend)
+        # Move model to CPU for quantization (PyTorch quantization is CPU-only)
+        model_copy = model_copy.to('cpu')
+        
+        # Set quantization configuration - use per_tensor for compatibility
+        if self.backend == 'fbgemm':
+            # Use per_tensor quantization for better compatibility
+            qconfig = torch.quantization.QConfig(
+                activation=torch.quantization.default_observer,
+                weight=torch.quantization.default_weight_observer
+            )
+        else:
+            qconfig = torch.quantization.get_default_qconfig(self.backend)
+        
+        model_copy.qconfig = qconfig
         
         # Prepare model for quantization
         model_prepared = torch.quantization.prepare(model_copy)
@@ -187,53 +310,112 @@ class StaticQuantizer(BaseQuantizer):
         model.eval()
         with torch.no_grad():
             for inputs, _ in calibration_data:
-                inputs = inputs.to(self.device)
+                inputs = inputs.to('cpu')  # Ensure data is on CPU for quantization
                 model(inputs)
 
 
 class QATQuantizer(BaseQuantizer):
-    """Quantization Aware Training implementation"""
+    """Quantization Aware Training implementation using FX Graph Mode"""
     
-    def __init__(self, device: torch.device = None, backend: str = 'fbgemm'):
+    def __init__(self, device: torch.device = None, backend: str = 'fbgemm', 
+                 train_epochs: int = 3, learning_rate: float = 1e-4):
         super().__init__(device)
         self.backend = backend
-        torch.backends.quantized.engine = backend
-    
-    def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader = None) -> nn.Module:
+        self.qconfig_mapping = get_default_qat_qconfig(self.backend)
+        self.train_epochs = train_epochs
+        self.learning_rate = learning_rate
+        print(f"QATQuantizer initialized with device: {self.device}, backend: {self.backend}, epochs: {self.train_epochs}, lr: {self.learning_rate}")
+
+    def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader) -> nn.Module:
         """
-        Prepare model for QAT (does not include actual training)
-        
-        Args:
-            model: Original model to quantize
-            calibration_data: Not used for QAT preparation
-            
-        Returns:
-            Model prepared for QAT
+        Apply Quantization Aware Training (QAT) to the model.
+        The 'calibration_data' is used as the training data for QAT.
         """
         self.original_model = copy.deepcopy(model)
-        model_copy = copy.deepcopy(model)
+        model_to_quantize = copy.deepcopy(self.original_model)
         
-        # Set QAT quantization configuration
-        model_copy.qconfig = torch.quantization.get_default_qat_qconfig(self.backend)
+        # Model should be on the training device (self.device can be CUDA)
+        model_to_quantize = model_to_quantize.to(self.device)
+        model_to_quantize.train() # Set to train mode for QAT
+
+        # Get example inputs for prepare_qat_fx
+        try:
+            # Ensure calibration_data is not empty and yields (inputs, targets)
+            example_batch = next(iter(calibration_data))
+            if isinstance(example_batch, (list, tuple)) and len(example_batch) > 0:
+                example_inputs = example_batch[0].to(self.device)
+            else: # Assuming loader yields only inputs if not a tuple/list
+                example_inputs = example_batch.to(self.device)
+
+            if not isinstance(example_inputs, torch.Tensor):
+                raise ValueError(f"Example inputs must be a torch.Tensor, got {type(example_inputs)}")
+
+        except StopIteration:
+            raise ValueError("calibration_data (training_data_loader for QAT) is empty. Cannot get example_inputs.")
+        except Exception as e:
+            raise ValueError(f"Error getting example_inputs from calibration_data: {e}")
         
-        # Prepare model for QAT
-        model_prepared = torch.quantization.prepare_qat(model_copy)
+        print(f"Preparing model for QAT on device: {self.device} with example input shape: {example_inputs.shape}")
+        # Prepare model for QAT using FX graph mode
+        model_prepared = prepare_qat_fx(model_to_quantize, torch.ao.quantization.QConfigMapping().set_global(self.qconfig_mapping), (example_inputs,))
+
+        # Fine-tune the model (QAT)
+        print(f"Starting QAT training for {self.train_epochs} epochs on device {self.device}...")
+        self._train_qat_loop(model_prepared, calibration_data)
+        print("QAT training finished.")
+
+        # Convert the QAT model to a quantized model (typically on CPU)
+        print("Converting QAT model to quantized model (on CPU)...")
+        quantized_model_cpu = model_prepared.eval().to('cpu')
+        self.quantized_model = convert_fx(quantized_model_cpu)
+        print("QAT model converted successfully.")
         
-        self.quantized_model = model_prepared
-        return model_prepared
-    
+        return self.quantized_model
+
+    def _train_qat_loop(self, model: nn.Module, train_loader: torch.utils.data.DataLoader):
+        model.train() # Ensure model is in training mode
+        # Model is already on self.device from the quantize method
+
+        optimizer = optim.Adam(model.parameters(), lr=self.learning_rate)
+        criterion = nn.CrossEntropyLoss()
+
+        for epoch in range(self.train_epochs):
+            epoch_loss = 0.0
+            correct_predictions = 0
+            total_samples = 0
+            
+            for batch_idx, (inputs, targets) in enumerate(train_loader):
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                optimizer.step()
+                
+                epoch_loss += loss.item() * inputs.size(0)
+                _, predicted = outputs.max(1)
+                total_samples += targets.size(0)
+                correct_predictions += predicted.eq(targets).sum().item()
+                
+                if batch_idx % 50 == 0: # Print progress every 50 batches
+                    print(f"  Epoch {epoch+1}/{self.train_epochs}, Batch {batch_idx}/{len(train_loader)} - Current Batch Loss: {loss.item():.4f}")
+
+            avg_epoch_loss = epoch_loss / total_samples if total_samples > 0 else 0.0
+            epoch_accuracy = 100. * correct_predictions / total_samples if total_samples > 0 else 0.0
+            print(f"Epoch {epoch+1}/{self.train_epochs} - Avg Loss: {avg_epoch_loss:.4f}, Accuracy: {epoch_accuracy:.2f}%")
+
     def convert_qat_model(self, qat_model: nn.Module) -> nn.Module:
         """
-        Convert QAT model to quantized model
-        
-        Args:
-            qat_model: QAT trained model
-            
-        Returns:
-            Quantized model
+        Converts a QAT-trained model to a fully quantized model.
+        Assumes qat_model has already been trained.
         """
-        qat_model.eval()
-        quantized_model = torch.quantization.convert(qat_model)
+        print("Converting externally trained QAT model to quantized model (on CPU)...")
+        qat_model_cpu = qat_model.to('cpu')
+        qat_model_cpu.eval()
+        quantized_model = convert_fx(qat_model_cpu)
+        self.quantized_model = quantized_model # Update self.quantized_model
+        print("External QAT model converted successfully.")
         return quantized_model
 
 
@@ -265,7 +447,7 @@ class FXQuantizer(BaseQuantizer):
         
         # Create qconfig mapping
         qconfig = torch.quantization.get_default_qconfig(self.backend)
-        qconfig_mapping = torch.quantization.QConfigMapping().set_global(qconfig)
+        qconfig_mapping = torch.ao.quantization.QConfigMapping().set_global(qconfig)
         
         # Get example input
         example_inputs = next(iter(calibration_data))[0][:1].to(self.device)
@@ -344,90 +526,176 @@ class INT8Quantizer(BaseQuantizer):
                 model(inputs)
 
 
-class QuantizationBenchmark:
+class QuantizationBenchmark(BaseQuantizer):
     """Benchmark different quantization methods"""
     
-    def __init__(self, device: torch.device = None):
+    def __init__(self, device: torch.device = None, backend: str = 'fbgemm'): # Added backend
+        super().__init__(device) # Call super init if it's inheriting
         self.device = device or torch.device('cpu')
+        self.backend = backend # Store backend
         self.results = {}
+        print(f"QuantizationBenchmark initialized with device: {self.device}, backend: {self.backend}")
     
     def benchmark_quantization_methods(self, model: nn.Module, 
                                      calibration_data: torch.utils.data.DataLoader,
                                      evaluation_data: torch.utils.data.DataLoader,
                                      methods: list = None) -> Dict[str, Dict[str, Any]]:
         """
-        Benchmark multiple quantization methods
-        
+        Benchmark different quantization methods on a given model.
+
         Args:
-            model: Original model to quantize
-            calibration_data: Calibration data loader
-            evaluation_data: Evaluation data loader
-            methods: List of quantization methods to benchmark
-            
+            model: Original model to quantize and benchmark.
+            calibration_data: DataLoader for calibration (static, FX) or training (QAT).
+            evaluation_data: DataLoader for evaluating model accuracy and performance.
+            methods: List of quantization method names to benchmark (e.g., ['dynamic', 'static', 'qat']).
+                     If None, all available methods are benchmarked.
+
         Returns:
-            Dictionary with benchmark results for each method
+            A dictionary containing benchmark results for each method.
         """
-        if methods is None:
-            methods = ['dynamic', 'static', 'fx', 'int8']
+        self.results = {}
+        original_model_size = self._get_model_size(model) # Correctly get original model size
         
-        quantizers = {
-            'dynamic': DynamicQuantizer(self.device),
-            'static': StaticQuantizer(self.device),
-            'qat': QATQuantizer(self.device),
-            'fx': FXQuantizer(self.device),
-            'int8': INT8Quantizer(self.device)
-        }
-        
-        results = {}
-        
+        # Get an example input tensor for inference time measurement
+        # Ensure evaluation_data is not empty and yields (inputs, targets) or just inputs
+        try:
+            example_batch_eval = next(iter(evaluation_data))
+            if isinstance(example_batch_eval, (list, tuple)) and len(example_batch_eval) > 0:
+                example_input, _ = example_batch_eval
+            else: # Assuming loader yields only inputs
+                example_input = example_batch_eval
+            
+            if not isinstance(example_input, torch.Tensor):
+                raise ValueError(f"Example input for benchmark must be a torch.Tensor, got {type(example_input)}")
+
+        except StopIteration:
+            print("Warning: evaluation_data is empty. Cannot get example_input for inference time measurement.")
+            example_input = None # Or create a dummy tensor based on model's expected input if known
+        except Exception as e:
+            print(f"Warning: Error getting example_input from evaluation_data: {e}. Inference time might not be measured.")
+            example_input = None
+
         # Evaluate original model
-        original_metrics = quantizers['dynamic'].evaluate_model(model, evaluation_data)
-        example_input = next(iter(evaluation_data))[0][:1].to(self.device)
-        original_timing = quantizers['dynamic'].measure_inference_time(model, example_input)
+        print("\nEvaluating original model...")
+        if example_input is not None:
+            original_time_stats = self.measure_inference_time(model.to(self.device), example_input.to(self.device))
+        else:
+            original_time_stats = {k: 0 for k in ['mean_time_ms', 'min_time_ms', 'max_time_ms', 'std_time_ms']}
+        original_eval_metrics = self.evaluate_model(model.to(self.device), evaluation_data)
         
-        results['original'] = {
-            'accuracy': original_metrics['accuracy'],
-            'loss': original_metrics['loss'],
-            'inference_time_ms': original_timing['mean_time_ms'],
-            'model_size_mb': self._get_model_size(model)
+        self.results['original'] = {
+            'accuracy': original_eval_metrics.get('accuracy', 0.0),
+            'loss': original_eval_metrics.get('loss', 0.0),
+            'model_size_mb': original_model_size,
+            **original_time_stats
         }
+        print(f"Original Model - Accuracy: {self.results['original']['accuracy']:.2f}%, "
+              f"Size: {original_model_size:.2f}MB, "
+              f"Inference Time: {original_time_stats.get('mean_time_ms', 0.0):.2f}ms")
+
+        # Get quantizers using the stored backend
+        all_quantizers = get_available_quantizers(backend=self.backend, device=self.device)
         
-        # Benchmark each quantization method
-        for method in methods:
-            if method not in quantizers:
-                print(f"Warning: Unknown quantization method '{method}', skipping...")
-                continue
+        if methods is None:
+            methods_to_run = list(all_quantizers.keys())
+        else:
+            methods_to_run = [m for m in methods if m in all_quantizers]
+
+        for method_name in methods_to_run:
+            quantizer = all_quantizers[method_name]
+            print(f"\nBenchmarking {method_name} quantization...")
             
             try:
-                print(f"Benchmarking {method} quantization...")
-                quantizer = quantizers[method]
+                # Quantize model
+                quantized_model = quantizer.quantize(copy.deepcopy(model), calibration_data)
                 
-                if method == 'dynamic':
-                    quantized_model = quantizer.quantize(model)
+                # Check if the quantized model has parameters
+                params = list(quantized_model.parameters())
+                if not params or not any(p.numel() > 0 for p in params): # Check if parameters exist and are not all empty
+                    print(f"Warning: Quantized model for {method_name} has no parameters or only empty parameters after conversion.")
+                    # Fallback to evaluating the model as is, assuming it might be a graph or a different structure
+                    # that doesn't rely on standard nn.Module parameters in the same way.
+                    eval_metrics = quantizer.evaluate_model(quantized_model, evaluation_data)
+                    
+                    if example_input is not None:
+                        # Ensure the input tensor is on the correct device for the quantized_model
+                        # This is a bit tricky if the model has no parameters to infer device from.
+                        # We'll try to use the quantizer's device or fall back to original model's device.
+                        try:
+                            # Attempt to get device from model if it has a device attribute (e.g. for FX graphs)
+                            q_device = quantized_model.device if hasattr(quantized_model, 'device') else quantizer.device
+                        except AttributeError:
+                            q_device = quantizer.device # Fallback to quantizer's device
+                        
+                        time_stats = quantizer.measure_inference_time(quantized_model, example_input.to(q_device))
+                    else:
+                        time_stats = {k: 0 for k in ['mean_time_ms', 'min_time_ms', 'max_time_ms', 'std_time_ms']}
+                    
+                    model_size_mb = self._get_model_size(quantized_model) # This might return 0 if it relies on parameters
+
+                    self.results[method_name] = {
+                        'accuracy': eval_metrics.get('accuracy', 0.0),
+                        'loss': eval_metrics.get('loss', 0.0),
+                        'model_size_mb': model_size_mb,
+                        # 'warning': f'Quantized model for {method_name} has no standard parameters or only empty ones.',
+                        'mean_time_ms': time_stats.get('mean_time_ms', 0.0),
+                        'min_time_ms': time_stats.get('min_time_ms', 0.0),
+                        'max_time_ms': time_stats.get('max_time_ms', 0.0),
+                        'std_time_ms': time_stats.get('std_time_ms', 0.0),
+                        'speedup': 0.0, 
+                        'compression_ratio': 0.0
+                    }
+                    print(f"Type of problematic quantized_model: {type(quantized_model)}")
+                    print(f"{method_name.capitalize()} Quantized Model (no params) - Accuracy: {self.results[method_name]['accuracy']:.2f}%, "
+                          f"Size: {model_size_mb:.2f}MB, "
+                          f"Inference Time: {time_stats.get('mean_time_ms', 0.0):.2f}ms")
+                    continue
+
+                quantized_model_device = params[0].device
+                print(f"Evaluating {method_name} quantized model on device: {quantized_model_device}")
+                eval_metrics = quantizer.evaluate_model(quantized_model, evaluation_data)
+                
+                if example_input is not None:
+                    time_stats = quantizer.measure_inference_time(quantized_model, example_input.to(quantized_model_device))
                 else:
-                    quantized_model = quantizer.quantize(model, calibration_data)
+                    time_stats = {k: 0 for k in ['mean_time_ms', 'min_time_ms', 'max_time_ms', 'std_time_ms']}
+
+                model_size_mb = self._get_model_size(quantized_model)
                 
-                # Evaluate quantized model
-                quantized_metrics = quantizer.evaluate_model(quantized_model, evaluation_data)
-                quantized_timing = quantizer.measure_inference_time(quantized_model, example_input)
+                # Calculate speedup and compression
+                original_mean_time = self.results.get('original', {}).get('mean_time_ms', 0.0)
+                current_mean_time = time_stats.get('mean_time_ms', float('inf')) # Avoid division by zero if current_mean_time is 0
+                speedup_ratio = original_mean_time / current_mean_time if current_mean_time > 0 and original_mean_time > 0 else 0.0
+
+                original_size = self.results.get('original', {}).get('model_size_mb', 0.0)
+                compression_ratio_val = original_size / model_size_mb if model_size_mb > 0 and original_size > 0 else 0.0
                 
-                results[method] = {
-                    'accuracy': quantized_metrics['accuracy'],
-                    'loss': quantized_metrics['loss'],
-                    'inference_time_ms': quantized_timing['mean_time_ms'],
-                    'model_size_mb': self._get_model_size(quantized_model),
-                    'accuracy_drop': original_metrics['accuracy'] - quantized_metrics['accuracy'],
-                    'speedup': original_timing['mean_time_ms'] / quantized_timing['mean_time_ms'],
-                    'compression_ratio': self._get_model_size(model) / self._get_model_size(quantized_model)
+                self.results[method_name] = {
+                    'accuracy': eval_metrics.get('accuracy', 0.0),
+                    'loss': eval_metrics.get('loss', 0.0),
+                    'model_size_mb': model_size_mb,
+                    'compression_ratio': compression_ratio_val,
+                    'speedup': speedup_ratio,
+                    **time_stats
                 }
+                print(f"{method_name.capitalize()} Quantized Model - Accuracy: {self.results[method_name]['accuracy']:.2f}%, "
+                      f"Size: {model_size_mb:.2f}MB, "
+                      f"Inference Time: {time_stats.get('mean_time_ms', 0.0):.2f}ms, "
+                      f"Speedup: {speedup_ratio:.2f}x, "
+                      f"Compression: {compression_ratio_val:.2f}x")
+
             except Exception as e:
-                print(f"Error benchmarking {method} quantization: {e}")
-                results[method] = {
-                    'error': str(e)
+                print(f"Error benchmarking {method_name}: {e}")
+                traceback.print_exc()
+                self.results[method_name] = {
+                    'accuracy': 0.0, 'loss': 0.0, 'model_size_mb': 0.0, 
+                    'error': str(e),
+                    'mean_time_ms': 0.0, 'min_time_ms': 0.0, 'max_time_ms': 0.0, 'std_time_ms': 0.0, # Ensure keys exist
+                    'speedup': 0.0, 'compression_ratio': 0.0
                 }
         
-        self.results = results
-        return results
+        return self.results
+    
     
     def _get_model_size(self, model: nn.Module) -> float:
         """
@@ -451,39 +719,47 @@ class QuantizationBenchmark:
             print("No results to display. Run benchmark_quantization_methods first.")
             return
         
-        print("\n" + "="*80)
+        print("\n" + "="*100) # Increased width for new columns
         print("QUANTIZATION BENCHMARK RESULTS")
-        print("="*80)
+        print("="*100)
         print(f"{'Method':<12} {'Accuracy':<10} {'Loss':<8} {'Time(ms)':<10} {'Size(MB)':<10} {'Speedup':<8} {'Compression':<12}")
-        print("-"*80)
+        print("-"*100)
         
-        for method, results in self.results.items():
-            if 'error' in results:
-                print(f"{method:<12} ERROR: {results['error']}")
+        for method, res_data in self.results.items(): # Renamed results to res_data to avoid conflict
+            if 'error' in res_data and res_data['error']: # Check if error is not None or empty
+                print(f"{method:<12} ERROR: {res_data['error']}")
                 continue
                 
-            accuracy = f"{results['accuracy']:.2f}%"
-            loss = f"{results['loss']:.4f}"
-            time_ms = f"{results['inference_time_ms']:.2f}"
-            size_mb = f"{results['model_size_mb']:.2f}"
+            accuracy = f"{res_data.get('accuracy', 0.0):.2f}%"
+            loss = f"{res_data.get('loss', 0.0):.4f}"
+            time_ms = f"{res_data.get('mean_time_ms', 0.0):.2f}" # Use mean_time_ms
+            size_mb = f"{res_data.get('model_size_mb', 0.0):.2f}"
             
             if method == 'original':
                 speedup = "1.00x"
                 compression = "1.00x"
             else:
-                speedup = f"{results.get('speedup', 0):.2f}x"
-                compression = f"{results.get('compression_ratio', 0):.2f}x"
+                speedup = f"{res_data.get('speedup', 0.0):.2f}x"
+                compression = f"{res_data.get('compression_ratio', 0.0):.2f}x"
             
             print(f"{method:<12} {accuracy:<10} {loss:<8} {time_ms:<10} {size_mb:<10} {speedup:<8} {compression:<12}")
+        print("="*100)
 
-
-def get_available_quantizers() -> Dict[str, BaseQuantizer]:
+def get_available_quantizers(backend: str = 'fbgemm', device: torch.device = None) -> Dict[str, BaseQuantizer]: # Added backend and device
     """Get dictionary of available quantizers"""
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # QAT training parameters (epochs, lr) can be further customized if needed,
+    # e.g., by passing them as arguments here or reading from a config.
+    # For now, QATQuantizer uses its defaults or those passed to its constructor.
+    qat_train_epochs = 3 # Example: could be configurable
+    qat_learning_rate = 1e-4 # Example: could be configurable
+
     return {
         'dynamic': DynamicQuantizer(device),
-        'static': StaticQuantizer(device),
-        'qat': QATQuantizer(device),
-        'fx': FXQuantizer(device),
-        'int8': INT8Quantizer(device)
+        'static': StaticQuantizer(device, backend=backend),
+        'qat': QATQuantizer(device, backend=backend, train_epochs=qat_train_epochs, learning_rate=qat_learning_rate),
+        'fx': FXQuantizer(device, backend=backend),
+        'int8': INT8Quantizer(device) # INT8Quantizer might also need backend or specific qconfigs
     }
