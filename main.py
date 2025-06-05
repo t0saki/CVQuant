@@ -45,7 +45,7 @@ def parse_arguments():
     # Quantization configuration
     parser.add_argument('--methods', nargs='+', 
                        default=['dynamic', 'static', 'qat'],
-                       choices=['dynamic', 'static', 'qat', 'fx', 'int8'],
+                       choices=['dynamic', 'static', 'qat', 'fx', 'int8', 'official'],
                        help='Quantization methods to benchmark')
     parser.add_argument('--backend', type=str, default='x86',
                        choices=['fbgemm', 'qnnpack', 'x86'],

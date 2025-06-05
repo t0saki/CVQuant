@@ -620,6 +620,7 @@ class QuantizationBenchmark(BaseQuantizer):
                     print(f"Warning: Quantized model for {method_name} has no parameters or only empty parameters after conversion.")
                     # Fallback to evaluating the model as is, assuming it might be a graph or a different structure
                     # that doesn't rely on standard nn.Module parameters in the same way.
+                    # That means we don't have a meaningful way to measure speedup or compression ratio.
                     eval_metrics = quantizer.evaluate_model(quantized_model, evaluation_data)
                     
                     if example_input is not None:
@@ -757,21 +758,195 @@ class QuantizationBenchmark(BaseQuantizer):
             print(f"{method:<12} {accuracy:<10} {loss:<8} {time_ms:<10} {size_mb:<10} {speedup:<8} {compression:<12}")
         print("="*100)
 
-def get_available_quantizers(backend: str = 'fbgemm', device: torch.device = None) -> Dict[str, BaseQuantizer]: # Added backend and device
+class OfficialQuantizedQuantizer(BaseQuantizer):
+    """Official pre-trained quantized models from torchvision.models.quantization"""
+    
+    def __init__(self, device: torch.device = None):
+        super().__init__(device)
+        # Official quantized models are designed for CPU inference
+        self.device = torch.device('cpu')
+    
+    def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader = None) -> nn.Module:
+        """
+        Load official pre-trained quantized model as reference
+        
+        Args:
+            model: Original model (used to determine which official quantized model to load)
+            calibration_data: Not used for this method (official models are already quantized)
+            
+        Returns:
+            Official pre-trained quantized model
+        """
+        self.original_model = copy.deepcopy(model)
+        
+        # Determine model type and load corresponding official quantized model
+        model_name = self._get_model_name(model)
+        quantized_model = self._load_official_quantized_model(model_name)
+        
+        if quantized_model is None:
+            raise ValueError(f"No official quantized model available for {model_name}")
+        
+        # Move to CPU (official quantized models are designed for CPU)
+        quantized_model = quantized_model.to('cpu')
+        quantized_model.eval()
+        
+        self.quantized_model = quantized_model
+        return quantized_model
+    
+    def _get_model_name(self, model: nn.Module) -> str:
+        """Extract model name from model instance"""
+        model_class_name = model.__class__.__name__.lower()
+        
+        # Check for ResNet models
+        if 'resnet' in model_class_name or hasattr(model, 'layer1'):
+            # Try to determine ResNet variant based on architecture
+            if hasattr(model, 'layer4'):
+                # Count layers to determine ResNet variant
+                layer4_blocks = len(model.layer4) if hasattr(model, 'layer4') else 0
+                layer3_blocks = len(model.layer3) if hasattr(model, 'layer3') else 0
+                
+                if layer4_blocks == 2 and layer3_blocks == 2:
+                    return 'resnet18'
+                elif layer4_blocks == 3 and layer3_blocks == 6:
+                    return 'resnet50'
+                else:
+                    # Default to resnet18 for unknown configurations
+                    return 'resnet18'
+            else:
+                return 'resnet18'
+        
+        # Check for MobileNet models
+        elif 'mobilenet' in model_class_name:
+            if 'v3' in model_class_name or hasattr(model, 'features'):
+                # Try to determine MobileNetV3 variant
+                if hasattr(model, 'features') and len(model.features) > 15:
+                    return 'mobilenet_v3_large'
+                else:
+                    return 'mobilenet_v3_small'
+            else:
+                return 'mobilenet_v2'
+        
+        return 'unknown'
+    
+    def _load_official_quantized_model(self, model_name: str) -> nn.Module:
+        """Load official pre-trained quantized model"""
+        try:
+            if model_name.startswith('resnet18'):
+                from torchvision.models.quantization import resnet18
+                return resnet18(pretrained=True, quantize=True)
+            elif model_name.startswith('resnet50'):
+                from torchvision.models.quantization import resnet50
+                return resnet50(pretrained=True, quantize=True)
+            elif model_name.startswith('mobilenet_v2'):
+                from torchvision.models.quantization import mobilenet_v2
+                return mobilenet_v2(pretrained=True, quantize=True)
+            elif model_name.startswith('mobilenet_v3_large'):
+                from torchvision.models.quantization import mobilenet_v3_large
+                return mobilenet_v3_large(pretrained=True, quantize=True)
+            elif model_name.startswith('mobilenet_v3_small'):
+                # Note: mobilenet_v3_small quantized version might not be available
+                # Fall back to mobilenet_v3_large
+                try:
+                    from torchvision.models.quantization import mobilenet_v3_small
+                    return mobilenet_v3_small(pretrained=True, quantize=True)
+                except (ImportError, AttributeError):
+                    print("Warning: mobilenet_v3_small quantized version not available, using mobilenet_v3_large")
+                    from torchvision.models.quantization import mobilenet_v3_large
+                    return mobilenet_v3_large(pretrained=True, quantize=True)
+            else:
+                print(f"Warning: No official quantized model available for {model_name}")
+                return None
+                
+        except ImportError as e:
+            print(f"Error importing official quantized model for {model_name}: {e}")
+            return None
+        except Exception as e:
+            print(f"Error loading official quantized model for {model_name}: {e}")
+            return None
+    
+    def evaluate_model(self, model: nn.Module, data_loader: torch.utils.data.DataLoader) -> Dict[str, float]:
+        """
+        Evaluate the official quantized model
+        Note: Official quantized models run on CPU
+        """
+        model.eval()
+        model = model.to('cpu')  # Ensure model is on CPU
+        
+        correct = 0
+        total = 0
+        total_loss = 0.0
+        criterion = nn.CrossEntropyLoss()
+        
+        with torch.no_grad():
+            for inputs, targets in data_loader:
+                inputs, targets = inputs.to('cpu'), targets.to('cpu')  # Ensure data is on CPU
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                
+                total_loss += loss.item() * inputs.size(0)
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+        
+        accuracy = 100. * correct / total if total > 0 else 0.0
+        avg_loss = total_loss / total if total > 0 else 0.0
+        
+        return {
+            'accuracy': accuracy,
+            'loss': avg_loss,
+            'correct': correct,
+            'total': total
+        }
+    
+    def measure_inference_time(self, model: nn.Module, input_tensor: torch.Tensor, 
+                             warmup_iterations: int = 50, benchmark_iterations: int = 500) -> Dict[str, float]:
+        """
+        Measure inference time for official quantized model
+        Note: Official quantized models run on CPU
+        """
+        model.eval()
+        model = model.to('cpu')
+        input_tensor = input_tensor.to('cpu')
+        
+        # Warmup
+        with torch.no_grad():
+            for _ in range(warmup_iterations):
+                _ = model(input_tensor)
+        
+        # Benchmark
+        times = []
+        with torch.no_grad():
+            for _ in range(benchmark_iterations):
+                start_time = time.time()
+                _ = model(input_tensor)
+                end_time = time.time()
+                times.append((end_time - start_time) * 1000)  # Convert to milliseconds
+        
+        return {
+            'mean_time_ms': sum(times) / len(times),
+            'min_time_ms': min(times),
+            'max_time_ms': max(times),
+            'std_time_ms': (sum([(t - sum(times)/len(times))**2 for t in times]) / len(times))**0.5
+        }
+
+def get_available_quantizers(backend: str = 'qnnpack', device: torch.device = None) -> Dict[
+    str, BaseQuantizer]:  # Added backend and device
     """Get dictionary of available quantizers"""
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
+
     # QAT training parameters (epochs, lr) can be further customized if needed,
     # e.g., by passing them as arguments here or reading from a config.
     # For now, QATQuantizer uses its defaults or those passed to its constructor.
-    qat_train_epochs = 10 # Example: could be configurable
-    qat_learning_rate = 1e-5 # Example: could be configurable
+    qat_train_epochs = 10  # Example: could be configurable
+    qat_learning_rate = 1e-5  # Example: could be configurable
 
     return {
         'dynamic': DynamicQuantizer(device),
         'static': StaticQuantizer(device, backend=backend),
-        'qat': QATQuantizer(device, backend=backend, train_epochs=qat_train_epochs, learning_rate=qat_learning_rate),
+        'qat': QATQuantizer(device, backend=backend, train_epochs=qat_train_epochs,
+                            learning_rate=qat_learning_rate),
         'fx': FXQuantizer(device, backend=backend),
-        'int8': INT8Quantizer(device) # INT8Quantizer might also need backend or specific qconfigs
+        'int8': INT8Quantizer(device),
+        'official': OfficialQuantizedQuantizer(device)
     }
