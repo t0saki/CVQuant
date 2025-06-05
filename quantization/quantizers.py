@@ -255,10 +255,15 @@ class DynamicQuantizer(BaseQuantizer):
 class StaticQuantizer(BaseQuantizer):
     """Static quantization implementation"""
     
-    def __init__(self, device: torch.device = None, backend: str = 'fbgemm'):
+    def __init__(self, device: torch.device = None, backend: str = None):
         super().__init__(device)
         self.backend = backend
-        torch.backends.quantized.engine = backend
+        if device == torch.device('cuda'):
+            backend = 'fbgemm'
+            torch.backends.quantized.engine = backend
+        elif device == torch.device('mps'):
+            backend = 'qnnpack'
+            torch.backends.quantized.engine = backend
     
     def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader) -> nn.Module:
         """
@@ -724,7 +729,10 @@ class QuantizationBenchmark(BaseQuantizer):
         print("="*100)
         print(f"{'Method':<12} {'Accuracy':<10} {'Loss':<8} {'Time(ms)':<10} {'Size(MB)':<10} {'Speedup':<8} {'Compression':<12}")
         print("-"*100)
-        
+
+        original_speed = 0.0
+        original_comp = 0.0
+
         for method, res_data in self.results.items(): # Renamed results to res_data to avoid conflict
             if 'error' in res_data and res_data['error']: # Check if error is not None or empty
                 print(f"{method:<12} ERROR: {res_data['error']}")
@@ -734,13 +742,17 @@ class QuantizationBenchmark(BaseQuantizer):
             loss = f"{res_data.get('loss', 0.0):.4f}"
             time_ms = f"{res_data.get('mean_time_ms', 0.0):.2f}" # Use mean_time_ms
             size_mb = f"{res_data.get('model_size_mb', 0.0):.2f}"
-            
+
             if method == 'original':
                 speedup = "1.00x"
+                original_speed = res_data.get('mean_time_ms', 0.0)
                 compression = "1.00x"
+                original_comp = res_data.get('model_size_mb', 0.0)
             else:
-                speedup = f"{res_data.get('speedup', 0.0):.2f}x"
-                compression = f"{res_data.get('compression_ratio', 0.0):.2f}x"
+                # speedup = f"{res_data.get('speedup', 0.0):.2f}x"
+                # compression = f"{res_data.get('compression_ratio', 0.0):.2f}x"
+                speedup = f"{original_speed / res_data.get('mean_time_ms', 0.0):.2f}x" if res_data.get('mean_time_ms', 0.0) > 0 else f"{res_data.get('speedup', 0.0):.2f}x"
+                compression = f"{original_comp / res_data.get('model_size_mb', 0.0):.2f}x" if res_data.get('model_size_mb', 0.0) > 0 else f"{res_data.get('compression_ratio', 0.0):.2f}x"
             
             print(f"{method:<12} {accuracy:<10} {loss:<8} {time_ms:<10} {size_mb:<10} {speedup:<8} {compression:<12}")
         print("="*100)
@@ -753,8 +765,8 @@ def get_available_quantizers(backend: str = 'fbgemm', device: torch.device = Non
     # QAT training parameters (epochs, lr) can be further customized if needed,
     # e.g., by passing them as arguments here or reading from a config.
     # For now, QATQuantizer uses its defaults or those passed to its constructor.
-    qat_train_epochs = 3 # Example: could be configurable
-    qat_learning_rate = 1e-4 # Example: could be configurable
+    qat_train_epochs = 10 # Example: could be configurable
+    qat_learning_rate = 1e-5 # Example: could be configurable
 
     return {
         'dynamic': DynamicQuantizer(device),

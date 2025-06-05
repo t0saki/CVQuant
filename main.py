@@ -44,13 +44,15 @@ def parse_arguments():
     
     # Quantization configuration
     parser.add_argument('--methods', nargs='+', 
-                       default=['dynamic', 'static'],
+                       default=['dynamic', 'static', 'qat'],
                        choices=['dynamic', 'static', 'qat', 'fx', 'int8'],
                        help='Quantization methods to benchmark')
-    parser.add_argument('--backend', type=str, default='fbgemm',
-                       choices=['fbgemm', 'qnnpack'],
+    parser.add_argument('--backend', type=str, default='x86',
+                       choices=['fbgemm', 'qnnpack', 'x86'],
                        help='Quantization backend')
-    
+    # parser.add_argument('--proxy', type=str, default="http://localhost:7897",
+    #                    help='Use proxy for downloading datasets')
+
     # Experiment configuration
     parser.add_argument('--output-dir', type=str, default='./results',
                        help='Output directory for results')
@@ -63,7 +65,7 @@ def parse_arguments():
     parser.add_argument('--disable-finetuning', action='store_true',
                        help='Disable fine-tuning and use only pretrained weights')
     parser.add_argument('--device', type=str, default='auto',
-                       choices=['auto', 'cpu', 'cuda'],
+                       choices=['auto', 'cpu', 'cuda', 'mps'],
                        help='Device to use for experiments')
     
     # Benchmark configuration
@@ -78,7 +80,7 @@ def parse_arguments():
 def setup_device(device_arg: str) -> torch.device:
     """Setup computation device"""
     if device_arg == 'auto':
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     else:
         device = torch.device(device_arg)
     
@@ -87,6 +89,8 @@ def setup_device(device_arg: str) -> torch.device:
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
         print("NOTE: Quantization will run on CPU as PyTorch quantization operations are CPU-only")
+    else:
+        print(f"Using device: {device}")
     
     return device
 
@@ -128,7 +132,7 @@ def run_quantization_experiments(model: nn.Module, model_name: str,
     print(f"Methods: {methods}")
     
     # Create benchmark instance
-    benchmark = QuantizationBenchmark(device=device)
+    benchmark = QuantizationBenchmark(device=device, backend=args.backend)
     
     # Run benchmark
     results = benchmark.benchmark_quantization_methods(
@@ -297,6 +301,28 @@ def main():
     print("="*60)
     
     try:
+        # if args.proxy:
+        #     os.environ['HTTP_PROXY'] = args.proxy
+        #     os.environ['HTTPS_PROXY'] = args.proxy
+        #     # from six.moves import urllib
+        #     #
+        #     # proxy = urllib.request.ProxyHandler({'http': args.proxy, 'https': args.proxy})
+        #     # # construct a new opener using your proxy settings
+        #     # opener = urllib.request.build_opener(proxy)
+        #     # # install the openen on the module-level
+        #     # urllib.request.install_opener(opener)
+        #     #
+        #     import torchvision
+        #
+        #     torchvision.datasets.CIFAR10(root=args.data_path, train=True, download=True)
+        #     torchvision.datasets.CIFAR10(root=args.data_path, train=False, download=True)
+        #     torchvision.datasets.CIFAR100(root=args.data_path, train=True, download=True)
+        #     torchvision.datasets.CIFAR100(root=args.data_path, train=False, download=True)
+        #     torchvision.datasets.ImageNet(root=args.data_path, split='train', download=True)
+        #     torchvision.datasets.ImageNet(root=args.data_path, split='val', download=True)
+        #     torchvision.datasets.MNIST(root=args.data_path, train=True, download=True)
+        #     torchvision.datasets.MNIST(root=args.data_path, train=False, download=True)
+
         # Load and prepare model with optional fine-tuning
         enable_finetuning = args.enable_finetuning and not args.disable_finetuning
         model = load_and_prepare_model(args.model, args.dataset, device, enable_finetuning)
