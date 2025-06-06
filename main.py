@@ -132,7 +132,7 @@ def run_quantization_experiments(model: nn.Module, model_name: str,
     print(f"Methods: {methods}")
     
     # Create benchmark instance
-    benchmark = QuantizationBenchmark(device=device, backend=args.backend)
+    benchmark = QuantizationBenchmark(device=device, backend=args.backend, model_name=model_name)
     
     # Run benchmark
     results = benchmark.benchmark_quantization_methods(

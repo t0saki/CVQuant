@@ -16,10 +16,12 @@ from typing import Dict, Any, Callable, Optional, Tuple
 class BaseQuantizer:
     """Base class for all quantization methods"""
     
-    def __init__(self, device: torch.device = None):
+    def __init__(self, device: torch.device = None, backend: str = 'qnnpack', model_name: str = None):
         self.device = device or torch.device('cpu')
         self.quantized_model = None
         self.original_model = None
+        self.backend = backend
+        self.model_name = model_name
     
     def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader = None) -> nn.Module:
         """
@@ -137,8 +139,8 @@ class BaseQuantizer:
 class DynamicQuantizer(BaseQuantizer):
     """Dynamic quantization implementation"""
     
-    def __init__(self, device: torch.device = None, qconfig_spec: Dict = None):
-        super().__init__(device)
+    def __init__(self, device: torch.device = None, qconfig_spec: Dict = None, **kwargs):
+        super().__init__(device, **kwargs)
         self.qconfig_spec = qconfig_spec or {nn.Linear, nn.Conv2d}
     
     def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader = None) -> nn.Module:
@@ -255,8 +257,8 @@ class DynamicQuantizer(BaseQuantizer):
 class StaticQuantizer(BaseQuantizer):
     """Static quantization implementation"""
     
-    def __init__(self, device: torch.device = None, backend: str = None):
-        super().__init__(device)
+    def __init__(self, device: torch.device = None, backend: str = None, **kwargs):
+        super().__init__(device, **kwargs)
         self.backend = backend
         if device == torch.device('cuda'):
             backend = 'fbgemm'
@@ -323,8 +325,8 @@ class QATQuantizer(BaseQuantizer):
     """Quantization Aware Training implementation using FX Graph Mode"""
     
     def __init__(self, device: torch.device = None, backend: str = 'fbgemm', 
-                 train_epochs: int = 3, learning_rate: float = 1e-4):
-        super().__init__(device)
+                 train_epochs: int = 3, learning_rate: float = 1e-4, **kwargs):
+        super().__init__(device, **kwargs)
         self.backend = backend
         self.qconfig_mapping = get_default_qat_qconfig(self.backend)
         self.train_epochs = train_epochs
@@ -427,8 +429,8 @@ class QATQuantizer(BaseQuantizer):
 class FXQuantizer(BaseQuantizer):
     """FX Graph Mode quantization implementation"""
     
-    def __init__(self, device: torch.device = None, backend: str = 'fbgemm'):
-        super().__init__(device)
+    def __init__(self, device: torch.device = None, backend: str = 'fbgemm', **kwargs):
+        super().__init__(device, **kwargs)
         self.backend = backend
         torch.backends.quantized.engine = backend
     
@@ -481,8 +483,8 @@ class FXQuantizer(BaseQuantizer):
 class INT8Quantizer(BaseQuantizer):
     """INT8 quantization using custom observers"""
     
-    def __init__(self, device: torch.device = None):
-        super().__init__(device)
+    def __init__(self, device: torch.device = None, **kwargs):
+        super().__init__(device, **kwargs)
     
     def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader) -> nn.Module:
         """
@@ -534,8 +536,8 @@ class INT8Quantizer(BaseQuantizer):
 class QuantizationBenchmark(BaseQuantizer):
     """Benchmark different quantization methods"""
     
-    def __init__(self, device: torch.device = None, backend: str = 'fbgemm'): # Added backend
-        super().__init__(device) # Call super init if it's inheriting
+    def __init__(self, device: torch.device = None, backend: str = 'fbgemm', **kwargs): # Added backend
+        super().__init__(device, **kwargs) # Call super init if it's inheriting
         self.device = device or torch.device('cpu')
         self.backend = backend # Store backend
         self.results = {}
@@ -599,7 +601,7 @@ class QuantizationBenchmark(BaseQuantizer):
               f"Inference Time: {original_time_stats.get('mean_time_ms', 0.0):.2f}ms")
 
         # Get quantizers using the stored backend
-        all_quantizers = get_available_quantizers(backend=self.backend, device=self.device)
+        all_quantizers = get_available_quantizers(backend=self.backend, device=self.device, model_name=self.model_name)
         
         if methods is None:
             methods_to_run = list(all_quantizers.keys())
@@ -761,8 +763,8 @@ class QuantizationBenchmark(BaseQuantizer):
 class OfficialQuantizedQuantizer(BaseQuantizer):
     """Official pre-trained quantized models from torchvision.models.quantization"""
     
-    def __init__(self, device: torch.device = None):
-        super().__init__(device)
+    def __init__(self, device: torch.device = None, **kwargs):
+        super().__init__(device, **kwargs)
         # Official quantized models are designed for CPU inference
         self.device = torch.device('cpu')
     
@@ -795,54 +797,23 @@ class OfficialQuantizedQuantizer(BaseQuantizer):
     
     def _get_model_name(self, model: nn.Module) -> str:
         """Extract model name from model instance"""
-        model_class_name = model.__class__.__name__.lower()
-        
-        # Check for ResNet models
-        if 'resnet' in model_class_name or hasattr(model, 'layer1'):
-            # Try to determine ResNet variant based on architecture
-            if hasattr(model, 'layer4'):
-                # Count layers to determine ResNet variant
-                layer4_blocks = len(model.layer4) if hasattr(model, 'layer4') else 0
-                layer3_blocks = len(model.layer3) if hasattr(model, 'layer3') else 0
-                
-                if layer4_blocks == 2 and layer3_blocks == 2:
-                    return 'resnet18'
-                elif layer4_blocks == 3 and layer3_blocks == 6:
-                    return 'resnet50'
-                else:
-                    # Default to resnet18 for unknown configurations
-                    return 'resnet18'
-            else:
-                return 'resnet18'
-        
-        # Check for MobileNet models
-        elif 'mobilenet' in model_class_name:
-            if 'v3' in model_class_name or hasattr(model, 'features'):
-                # Try to determine MobileNetV3 variant
-                if hasattr(model, 'features') and len(model.features) > 15:
-                    return 'mobilenet_v3_large'
-                else:
-                    return 'mobilenet_v3_small'
-            else:
-                return 'mobilenet_v2'
-        
-        return 'unknown'
+        return self.model_name
     
     def _load_official_quantized_model(self, model_name: str) -> nn.Module:
         """Load official pre-trained quantized model"""
         try:
             if model_name.startswith('resnet18'):
                 from torchvision.models.quantization import resnet18
-                return resnet18(pretrained=True, quantize=True)
+                return resnet18(pretrained=True, quantize=True, backend=self.backend)
             elif model_name.startswith('resnet50'):
                 from torchvision.models.quantization import resnet50
-                return resnet50(pretrained=True, quantize=True)
+                return resnet50(pretrained=True, quantize=True, backend=self.backend)
             elif model_name.startswith('mobilenet_v2'):
                 from torchvision.models.quantization import mobilenet_v2
-                return mobilenet_v2(pretrained=True, quantize=True)
+                return mobilenet_v2(pretrained=True, quantize=True, backend=self.backend)
             elif model_name.startswith('mobilenet_v3_large'):
                 from torchvision.models.quantization import mobilenet_v3_large
-                return mobilenet_v3_large(pretrained=True, quantize=True)
+                return mobilenet_v3_large(pretrained=True, quantize=True, backend=self.backend)
             elif model_name.startswith('mobilenet_v3_small'):
                 # Note: mobilenet_v3_small quantized version might not be available
                 # Fall back to mobilenet_v3_large
@@ -863,7 +834,7 @@ class OfficialQuantizedQuantizer(BaseQuantizer):
         except Exception as e:
             print(f"Error loading official quantized model for {model_name}: {e}")
             return None
-    
+
     def evaluate_model(self, model: nn.Module, data_loader: torch.utils.data.DataLoader) -> Dict[str, float]:
         """
         Evaluate the official quantized model
@@ -929,7 +900,7 @@ class OfficialQuantizedQuantizer(BaseQuantizer):
             'std_time_ms': (sum([(t - sum(times)/len(times))**2 for t in times]) / len(times))**0.5
         }
 
-def get_available_quantizers(backend: str = 'qnnpack', device: torch.device = None) -> Dict[
+def get_available_quantizers(backend: str = 'qnnpack', device: torch.device = None, model_name: str = None) -> Dict[
     str, BaseQuantizer]:  # Added backend and device
     """Get dictionary of available quantizers"""
     if device is None:
@@ -942,11 +913,11 @@ def get_available_quantizers(backend: str = 'qnnpack', device: torch.device = No
     qat_learning_rate = 1e-5  # Example: could be configurable
 
     return {
-        'dynamic': DynamicQuantizer(device),
-        'static': StaticQuantizer(device, backend=backend),
+        'dynamic': DynamicQuantizer(device, backend=backend, model_name=model_name),
+        'static': StaticQuantizer(device, backend=backend, model_name=model_name),
         'qat': QATQuantizer(device, backend=backend, train_epochs=qat_train_epochs,
-                            learning_rate=qat_learning_rate),
-        'fx': FXQuantizer(device, backend=backend),
-        'int8': INT8Quantizer(device),
-        'official': OfficialQuantizedQuantizer(device)
+                            learning_rate=qat_learning_rate, model_name=model_name),
+        'fx': FXQuantizer(device, backend=backend, model_name=model_name),
+        'int8': INT8Quantizer(device, backend=backend, model_name=model_name),
+        'official': OfficialQuantizedQuantizer(device, backend=backend, model_name=model_name),
     }
