@@ -8,14 +8,16 @@ from torchvision.models.quantization import resnet
 import timm
 from typing import Dict, Any, Optional
 from .quantizable_resnet import resnet50_quantizable, resnet18_quantizable
+from .quantizable_resnet_lrf import resnet18_low_rank, resnet50_low_rank
 
 class ModelLoader:
     """Load and prepare models for quantization experiments with fine-tuning support"""
     
-    def __init__(self, num_classes: int = 1000, device: torch.device = None, enable_finetuning: bool = True):
+    def __init__(self, num_classes: int = 1000, device: torch.device = None, enable_finetuning: bool = True, low_rank_epsilon: float = 0.3):
         self.num_classes = num_classes
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.enable_finetuning = enable_finetuning
+        self.low_rank_epsilon = low_rank_epsilon
         
         # Initialize fine-tuner if enabled
         self.fine_tuner = None
@@ -40,6 +42,8 @@ class ModelLoader:
             'resnet50': self._load_resnet50,
             'resnet18_quantizable': self._load_resnet18_quantizable,
             'resnet50_quantizable': self._load_resnet50_quantizable,
+            "resnet18_low_rank": self._load_resnet18_low_rank,
+            "resnet50_low_rank": self._load_resnet50_low_rank,
             'mobilenet_v2': self._load_mobilenet_v2,
             'mobilenet_v3_large': self._load_mobilenet_v3_large,
             'mobilenet_v3_small': self._load_mobilenet_v3_small,
@@ -108,6 +112,26 @@ class ModelLoader:
         """Load quantizable ResNet-50 model with QuantStub and DeQuantStub"""
         model = resnet50_quantizable(pretrained=pretrained, num_classes=self.num_classes)
         return model
+
+    def _load_resnet18_low_rank(self, pretrained: bool = True) -> nn.Module:
+        """Load ResNet-18 model with low rank factorization"""
+        model = resnet18_low_rank(
+            pretrained=pretrained,
+            num_classes=self.num_classes,
+            epsilon=self.low_rank_epsilon,
+            device=self.device
+        )
+        return model
+
+    def _load_resnet50_low_rank(self, pretrained: bool = True) -> nn.Module:
+        """Load ResNet-50 model with low rank factorization"""
+        model = resnet50_low_rank(
+            pretrained=pretrained,
+            num_classes=self.num_classes,
+            epsilon=self.low_rank_epsilon,
+            device=self.device
+        )
+        return model
     
     def _load_mobilenet_v2(self, pretrained: bool = True) -> nn.Module:
         """Load MobileNet V2 model"""
@@ -175,12 +199,25 @@ class ModelLoader:
         """
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        
-        return {
+
+        info = {
             'total_parameters': total_params,
             'trainable_parameters': trainable_params,
-            'model_size_mb': total_params * bytes / (1024 * 1024),  # Assuming float32
+            'model_size_mb': total_params * bytes / (1024 * 1024),
         }
+
+        # 添加压缩统计信息（如果有的话）
+        if hasattr(model, 'compression_stats'):
+            stats = model.compression_stats
+            info.update({
+                'compression_stats': stats,
+                'original_parameters': stats.get('total_old_size', total_params),
+                'compression_ratio': stats.get('compression_ratio', 1.0),
+                'parameter_reduction': stats.get('total_reduction', 0),
+                'epsilon': stats.get('epsilon', 'N/A')
+            })
+
+        return info
     
     def prepare_model_for_quantization(self, model: nn.Module, method: str) -> nn.Module:
         """
