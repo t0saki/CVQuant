@@ -9,6 +9,7 @@ import timm
 from typing import Dict, Any, Optional
 from .quantizable_resnet import resnet50_quantizable, resnet18_quantizable
 from .quantizable_resnet_lrf import resnet18_low_rank, resnet50_low_rank
+from .quantizable_mobilenet import mobilenet_v3_small_quantizable, mobilenet_v3_large_quantizable
 
 class ModelLoader:
     """Load and prepare models for quantization experiments with fine-tuning support"""
@@ -47,6 +48,8 @@ class ModelLoader:
             'mobilenet_v2': self._load_mobilenet_v2,
             'mobilenet_v3_large': self._load_mobilenet_v3_large,
             'mobilenet_v3_small': self._load_mobilenet_v3_small,
+            'mobilenet_v3_large_quantizable': self._load_mobilenet_v3_large_quantizable,
+            'mobilenet_v3_small_quantizable': self._load_mobilenet_v3_small_quantizable,
             'mobilenet_v4_conv_small': self._load_mobilenet_v4_conv_small,
             'mobilenet_v4_conv_medium': self._load_mobilenet_v4_conv_medium,
             'mobilenet_v4_conv_large': self._load_mobilenet_v4_conv_large,
@@ -152,6 +155,16 @@ class ModelLoader:
         model = models.mobilenet_v3_small(pretrained=pretrained)
         if self.num_classes != 1000:
             model.classifier[3] = nn.Linear(model.classifier[3].in_features, self.num_classes)
+        return model
+    
+    def _load_mobilenet_v3_large_quantizable(self, pretrained: bool = True) -> nn.Module:
+        """Load quantizable MobileNet V3 Large model with QuantStub and DeQuantStub"""
+        model = mobilenet_v3_large_quantizable(pretrained=pretrained, num_classes=self.num_classes)
+        return model
+    
+    def _load_mobilenet_v3_small_quantizable(self, pretrained: bool = True) -> nn.Module:
+        """Load quantizable MobileNet V3 Small model with QuantStub and DeQuantStub"""
+        model = mobilenet_v3_small_quantizable(pretrained=pretrained, num_classes=self.num_classes)
         return model
     
     def _load_mobilenet_v4_conv_small(self, pretrained: bool = True) -> nn.Module:
@@ -283,7 +296,10 @@ class ModelLoader:
             
             # Get training configuration
             config = self.fine_tuner.get_training_config(dataset_name, model_name)
-            
+            if "mobilenet" in model_name:
+                # For MobileNet models, use a smaller batch size
+                config['epochs'] = config.get('epochs', 64) * 10
+
             # Create data loaders for fine-tuning
             train_loader, val_loader = create_fine_tuning_data_loaders(
                 dataset_name=dataset_name,

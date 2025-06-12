@@ -11,6 +11,7 @@ import traceback # Added import
 from torch.quantization import QConfig, default_observer, default_weight_observer, get_default_qat_qconfig
 from torch.quantization.quantize_fx import prepare_fx, convert_fx, prepare_qat_fx
 from torch.ao.quantization.qconfig_mapping import QConfigMapping
+from torch.ao.quantization import get_default_qconfig_mapping, get_default_qat_qconfig_mapping
 from typing import Dict, Any, Callable, Optional, Tuple
 
 class BaseQuantizer:
@@ -328,7 +329,7 @@ class QATQuantizer(BaseQuantizer):
                  train_epochs: int = 3, learning_rate: float = 1e-4, **kwargs):
         super().__init__(device, **kwargs)
         self.backend = backend
-        self.qconfig_mapping = get_default_qat_qconfig(self.backend)
+        self.qconfig_mapping = get_default_qat_qconfig_mapping(self.backend)
         self.train_epochs = train_epochs
         self.learning_rate = learning_rate
         print(f"QATQuantizer initialized with device: {self.device}, backend: {self.backend}, epochs: {self.train_epochs}, lr: {self.learning_rate}")
@@ -364,7 +365,7 @@ class QATQuantizer(BaseQuantizer):
         
         print(f"Preparing model for QAT on device: {self.device} with example input shape: {example_inputs.shape}")
         # Prepare model for QAT using FX graph mode
-        model_prepared = prepare_qat_fx(model_to_quantize, torch.ao.quantization.QConfigMapping().set_global(self.qconfig_mapping), (example_inputs,))
+        model_prepared = prepare_qat_fx(model_to_quantize, self.qconfig_mapping, (example_inputs,))
 
         # Fine-tune the model (QAT)
         print(f"Starting QAT training for {self.train_epochs} epochs on device {self.device}...")
@@ -452,9 +453,8 @@ class FXQuantizer(BaseQuantizer):
         model_copy = copy.deepcopy(model)
         model_copy.eval()
         
-        # Create qconfig mapping
-        qconfig = torch.quantization.get_default_qconfig(self.backend)
-        qconfig_mapping = torch.ao.quantization.QConfigMapping().set_global(qconfig)
+        # Create qconfig mapping using recommended approach
+        qconfig_mapping = get_default_qconfig_mapping(self.backend)
         
         # Get example input
         example_inputs = next(iter(calibration_data))[0][:1].to(self.device)
