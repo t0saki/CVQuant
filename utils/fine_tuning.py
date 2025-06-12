@@ -263,6 +263,8 @@ def create_fine_tuning_data_loaders(dataset_name: str, data_path: str = "./data"
         Tuple of (train_loader, val_loader)
     """
     from .data_loader import create_data_loaders
+
+    sample_size = 50000
     
     # For fine-tuning, we need separate train and validation sets
     # We'll use the calibration loader as training and evaluation loader as validation
@@ -270,8 +272,8 @@ def create_fine_tuning_data_loaders(dataset_name: str, data_path: str = "./data"
         dataset_name=dataset_name,
         data_path=data_path,
         batch_size=batch_size,
-        calibration_size=int(5000 * train_split),  # Use more data for training
-        evaluation_size=int(5000 * (1 - train_split)),  # Rest for validation
+        calibration_size=int(sample_size * train_split),  # Use more data for training
+        evaluation_size=int(sample_size * (1 - train_split)),  # Rest for validation
         input_size=224
     )
     
