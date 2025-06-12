@@ -26,7 +26,7 @@ def parse_arguments():
     
     # Model configuration
     parser.add_argument('--model', type=str, default='resnet18_quantizable',
-                       choices=['resnet18', 'resnet50', 'resnet18_quantizable', 'resnet50_quantizable', 'mobilenet_v2', 'mobilenet_v3_large', 'mobilenet_v3_small', 'mobilenet_v3_large_quantizable', 'mobilenet_v3_small_quantizable', 'mobilenet_v4_conv_small', 'mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large'],
+                       choices=['resnet18', 'resnet50', 'resnet18_quantizable', 'resnet50_quantizable', 'resnet18_low_rank', 'resnet50_low_rank', 'mobilenet_v2', 'mobilenet_v3_large', 'mobilenet_v3_small', 'mobilenet_v3_large_quantizable', 'mobilenet_v3_small_quantizable', 'mobilenet_v4_conv_small', 'mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large'],
                        help='Model to use for quantization experiments')
     
     # Dataset configuration
@@ -37,9 +37,9 @@ def parse_arguments():
                        help='Path to dataset')
     parser.add_argument('--batch-size', type=int, default=32,
                        help='Batch size for data loading')
-    parser.add_argument('--calibration-size', type=int, default=1000,
+    parser.add_argument('--calibration-size', type=int, default=50000,
                        help='Size of calibration dataset')
-    parser.add_argument('--evaluation-size', type=int, default=5000,
+    parser.add_argument('--evaluation-size', type=int, default=10000,
                        help='Size of evaluation dataset')
     
     # Quantization configuration

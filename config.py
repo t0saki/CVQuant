@@ -13,10 +13,18 @@ class Config:
     # Model configuration
     MODELS = {
         'resnet18': 'torchvision',
-        'resnet50': 'torchvision', 
+        'resnet50': 'torchvision',
+        'resnet18_low_rank': 'custom',
+        'resnet50_low_rank': 'custom',
         'mobilenet_v2': 'torchvision',
         'mobilenet_v3_large': 'torchvision',
         'mobilenet_v3_small': 'torchvision'
+    }
+
+    LOW_RANK_CONFIG = {
+        'epsilon_values': [0.1, 0.2, 0.3, 0.4, 0.5],
+        'default_epsilon': 0.3,
+        'compression_types': ['linear', 'conv2d', 'both']
     }
     
     # Quantization configuration
@@ -37,8 +45,8 @@ class Config:
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Evaluation configuration
-    NUM_CALIBRATION_SAMPLES = 1000
-    NUM_EVALUATION_SAMPLES = 5000
+    NUM_CALIBRATION_SAMPLES = 50000
+    NUM_EVALUATION_SAMPLES = 10000
     
     # Results configuration
     RESULTS_DIR = "./results"
