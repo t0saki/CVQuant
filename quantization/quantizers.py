@@ -10,9 +10,11 @@ import tempfile  # Added import
 import traceback # Added import
 from torch.quantization import QConfig, default_observer, default_weight_observer, get_default_qat_qconfig
 from torch.quantization.quantize_fx import prepare_fx, convert_fx, prepare_qat_fx
-from torch.ao.quantization.qconfig_mapping import QConfigMapping
+from torch.ao.quantization import QConfigMapping
 from torch.ao.quantization import get_default_qconfig_mapping, get_default_qat_qconfig_mapping
+from torch.ao.quantization.quantize_fx import prepare_fx, convert_fx, prepare_qat_fx
 from typing import Dict, Any, Callable, Optional, Tuple
+import torch.ao.quantization as ao_quantization
 
 class BaseQuantizer:
     """Base class for all quantization methods"""
@@ -23,7 +25,69 @@ class BaseQuantizer:
         self.original_model = None
         self.backend = backend
         self.model_name = model_name
+        
+        # 设置torch.ao后端支持
+        self._setup_ao_backend()
     
+    def _setup_ao_backend(self):
+        """设置torch.ao量化后端"""
+        if self.device.type == 'cuda':
+            # CUDA设备使用fbgemm后端
+            torch.backends.quantized.engine = 'fbgemm'
+        elif self.device.type == 'mps':
+            # MPS设备使用qnnpack后端
+            torch.backends.quantized.engine = 'qnnpack'
+        else:
+            # CPU使用qnnpack后端
+            torch.backends.quantized.engine = 'qnnpack'
+    
+    def _get_device_compatible_model(self, model: nn.Module) -> nn.Module:
+        """获取与设备兼容的模型"""
+        if hasattr(model, '_modules') and any('quantized' in str(type(m)) for m in model.modules()):
+            # 量化模型需要特殊处理
+            if self.device.type in ['cuda', 'mps']:
+                # 对于GPU设备，将量化模型转换为可在GPU上运行的格式
+                return self._convert_quantized_for_device(model)
+        return model.to(self.device)
+    
+    def _convert_quantized_for_device(self, quantized_model: nn.Module) -> nn.Module:
+        """将量化模型转换为设备兼容格式"""
+        if self.device.type == 'cuda':
+            # CUDA设备支持
+            try:
+                # 使用torch.jit.script将量化模型转换为可在CUDA上运行的格式
+                scripted_model = torch.jit.script(quantized_model)
+                return scripted_model.to(self.device)
+            except:
+                # 如果script失败，尝试使用torch.ao的转换
+                return self._ao_device_conversion(quantized_model)
+        elif self.device.type == 'mps':
+            # MPS设备支持
+            return self._ao_device_conversion(quantized_model)
+        return quantized_model
+
+    def _ao_device_conversion(self, model: nn.Module) -> nn.Module:
+        """使用torch.ao进行设备转换"""
+        try:
+            # 创建设备兼容的模型包装器
+            class QuantizedModelWrapper(nn.Module):
+                def __init__(self, quantized_model, target_device):
+                    super().__init__()
+                    self.quantized_model = quantized_model.cpu()  # 量化模型保持在CPU
+                    self.target_device = target_device
+                
+                def forward(self, x):
+                    # 输入数据移到CPU进行量化推理
+                    x_cpu = x.cpu()
+                    output = self.quantized_model(x_cpu)
+                    # 输出移回目标设备
+                    return output.to(self.target_device)
+            
+            return QuantizedModelWrapper(model, self.device)
+        except Exception as e:
+            print(f"Warning: Device conversion failed: {e}, using CPU inference")
+            return model
+        
     def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader = None) -> nn.Module:
         """
         Quantize the model
@@ -55,7 +119,7 @@ class BaseQuantizer:
         criterion = nn.CrossEntropyLoss()
         
         # model_device = next(model.parameters()).device
-        model_device = self.device if hasattr(model, 'device') else torch.device('cpu')
+        model_device = self.device
         model = model.to(model_device)  # Ensure model is on the correct device
         
         with torch.no_grad():
@@ -256,29 +320,78 @@ class DynamicQuantizer(BaseQuantizer):
 
 
 class StaticQuantizer(BaseQuantizer):
-    """Static quantization implementation"""
+    """Static quantization implementation with torch.ao support"""
     
     def __init__(self, device: torch.device = None, backend: str = None, **kwargs):
         super().__init__(device, **kwargs)
-        self.backend = backend
-        if device == torch.device('cuda'):
-            backend = 'fbgemm'
-            torch.backends.quantized.engine = backend
-        elif device == torch.device('mps'):
-            backend = 'qnnpack'
-            torch.backends.quantized.engine = backend
-    
-    def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader) -> nn.Module:
-        """
-        Apply static quantization to the model
+        if backend:
+            self.backend = backend
+        else:
+            # 根据设备自动选择后端
+            if device and device.type == 'cuda':
+                self.backend = 'fbgemm'
+            else:
+                self.backend = 'qnnpack'
         
-        Args:
-            model: Original model to quantize
-            calibration_data: Calibration data loader
-            
-        Returns:
-            Statically quantized model
+        # 设置torch.ao配置
+        self._setup_ao_config()
+    
+    def _setup_ao_config(self):
+        """设置torch.ao量化配置"""
+        self.qconfig_mapping = get_default_qconfig_mapping(self.backend)
+        
+    def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader = None) -> nn.Module:
         """
+        Apply static quantization using torch.ao
+        """
+        self.original_model = copy.deepcopy(model)
+        model_copy = copy.deepcopy(model)
+        
+        try:
+            # 使用torch.ao的FX图模式量化
+            return self._quantize_with_ao_fx(model_copy, calibration_data)
+        except Exception as e:
+            print(f"Warning: torch.ao FX quantization failed: {e}")
+            print("Falling back to legacy quantization")
+            return self._quantize_legacy(model_copy, calibration_data)
+    
+    def _quantize_with_ao_fx(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader) -> nn.Module:
+        """使用torch.ao FX图模式量化"""
+        model = model.to('cpu')  # 准备阶段在CPU进行
+        model.eval()
+        
+        # 准备模型进行量化
+        example_inputs = self._get_example_inputs(calibration_data)
+        prepared_model = prepare_fx(model, self.qconfig_mapping, example_inputs)
+        
+        # 校准
+        self._calibrate_model(prepared_model, calibration_data)
+        
+        # 转换为量化模型
+        quantized_model = convert_fx(prepared_model)
+        
+        # 处理设备兼容性
+        self.quantized_model = self._get_device_compatible_model(quantized_model)
+        return self.quantized_model
+    
+    def _get_example_inputs(self, calibration_data: torch.utils.data.DataLoader) -> tuple:
+        """获取示例输入用于torch.ao"""
+        for inputs, _ in calibration_data:
+            return (inputs[:1].cpu(),)  # 只需要一个批次作为示例
+        raise ValueError("Calibration data is empty")
+    
+    def _calibrate_model(self, prepared_model: nn.Module, calibration_data: torch.utils.data.DataLoader):
+        """校准模型"""
+        prepared_model.eval()
+        with torch.no_grad():
+            for i, (inputs, _) in enumerate(calibration_data):
+                inputs = inputs.cpu()
+                prepared_model(inputs)
+                if i >= 100:  # 限制校准样本数量
+                    break
+    
+    def _quantize_legacy(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader) -> nn.Module:
+        """传统量化方法作为后备"""
         if calibration_data is None:
             raise ValueError("Calibration data is required for static quantization")
         
@@ -320,79 +433,112 @@ class StaticQuantizer(BaseQuantizer):
             for inputs, _ in calibration_data:
                 inputs = inputs.to('cpu')  # Ensure data is on CPU for quantization
                 model(inputs)
-
+    
+    def evaluate_model(self, model: nn.Module, data_loader: torch.utils.data.DataLoader) -> Dict[str, float]:
+        """评估支持多设备的量化模型"""
+        model.eval()
+        correct = 0
+        total = 0
+        total_loss = 0.0
+        criterion = nn.CrossEntropyLoss()
+        
+        # 确保criterion在正确的设备上
+        criterion = criterion.to(self.device)
+        
+        with torch.no_grad():
+            for inputs, targets in data_loader:
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                outputs = model(inputs)
+                
+                # 确保输出在正确的设备上进行损失计算
+                if outputs.device != targets.device:
+                    outputs = outputs.to(targets.device)
+                
+                loss = criterion(outputs, targets)
+                total_loss += loss.item() * inputs.size(0)
+                
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+        
+        accuracy = 100. * correct / total if total > 0 else 0.0
+        avg_loss = total_loss / total if total > 0 else 0.0
+        
+        return {
+            'accuracy': accuracy,
+            'loss': avg_loss,
+            'correct': correct,
+            'total': total
+        }
 
 class QATQuantizer(BaseQuantizer):
-    """Quantization Aware Training implementation using FX Graph Mode"""
+    """Quantization Aware Training implementation with torch.ao support"""
     
-    def __init__(self, device: torch.device = None, backend: str = 'fbgemm', 
-                 train_epochs: int = 3, learning_rate: float = 1e-4, **kwargs):
+    def __init__(self, device: torch.device = None, backend: str = None, train_epochs: int = 3, learning_rate: float = 1e-4, **kwargs):
         super().__init__(device, **kwargs)
-        self.backend = backend
-        self.qconfig_mapping = get_default_qat_qconfig_mapping(self.backend)
+        if backend:
+            self.backend = backend
+        else:
+            if device and device.type == 'cuda':
+                self.backend = 'fbgemm'
+            else:
+                self.backend = 'qnnpack'
+
         self.train_epochs = train_epochs
         self.learning_rate = learning_rate
-        print(f"QATQuantizer initialized with device: {self.device}, backend: {self.backend}, epochs: {self.train_epochs}, lr: {self.learning_rate}")
-
-    def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader) -> nn.Module:
+        self._setup_ao_qat_config()
+    
+    def _setup_ao_qat_config(self):
+        """设置torch.ao QAT配置"""
+        self.qconfig_mapping = get_default_qat_qconfig_mapping(self.backend)
+    
+    def quantize(self, model: nn.Module, calibration_data: torch.utils.data.DataLoader = None) -> nn.Module:
         """
-        Apply Quantization Aware Training (QAT) to the model.
-        The 'calibration_data' is used as the training data for QAT.
+        Apply QAT using torch.ao
         """
         self.original_model = copy.deepcopy(model)
-        model_to_quantize = copy.deepcopy(self.original_model)
+        model_copy = copy.deepcopy(model)
         
-        # Model should be on the training device (self.device can be CUDA)
-        model_to_quantize = model_to_quantize.to(self.device)
-        model_to_quantize.train() # Set to train mode for QAT
-
-        # Get example inputs for prepare_qat_fx
         try:
-            # Ensure calibration_data is not empty and yields (inputs, targets)
-            example_batch = next(iter(calibration_data))
-            if isinstance(example_batch, (list, tuple)) and len(example_batch) > 0:
-                example_inputs = example_batch[0].to(self.device)
-            else: # Assuming loader yields only inputs if not a tuple/list
-                example_inputs = example_batch.to(self.device)
-
-            if not isinstance(example_inputs, torch.Tensor):
-                raise ValueError(f"Example inputs must be a torch.Tensor, got {type(example_inputs)}")
-
-        except StopIteration:
-            raise ValueError("calibration_data (training_data_loader for QAT) is empty. Cannot get example_inputs.")
+            return self._quantize_with_ao_qat_fx(model_copy, calibration_data)
         except Exception as e:
-            raise ValueError(f"Error getting example_inputs from calibration_data: {e}")
+            print(f"Warning: torch.ao QAT FX failed: {e}")
+            print("Falling back to legacy QAT")
+            return self._quantize_legacy_qat(model_copy, calibration_data)
+    
+    def _quantize_with_ao_qat_fx(self, model: nn.Module, training_data: torch.utils.data.DataLoader) -> nn.Module:
+        """使用torch.ao FX图模式QAT"""
+        model = model.to(self.device)  # QAT训练可以在GPU上进行
+        model.train()
         
-        print(f"Preparing model for QAT on device: {self.device} with example input shape: {example_inputs.shape}")
-        # Prepare model for QAT using FX graph mode
-        model_prepared = prepare_qat_fx(model_to_quantize, self.qconfig_mapping, (example_inputs,))
-
-        # Fine-tune the model (QAT)
-        print(f"Starting QAT training for {self.train_epochs} epochs on device {self.device}...")
-        self._train_qat_loop(model_prepared, calibration_data)
-        print("QAT training finished.")
-
-        # Convert the QAT model to a quantized model (typically on CPU)
-        print("Converting QAT model to quantized model (on CPU)...")
-        quantized_model_cpu = model_prepared.eval().to('cpu')
-        self.quantized_model = convert_fx(quantized_model_cpu)
-        print("QAT model converted successfully.")
+        # 准备QAT模型
+        example_inputs = self._get_example_inputs(training_data)
+        prepared_model = prepare_qat_fx(model, self.qconfig_mapping, example_inputs)
         
+        # 进行QAT训练
+        trained_model = self._perform_qat_training(prepared_model, training_data)
+        
+        # 转换为量化模型
+        trained_model.eval()
+        trained_model = trained_model.cpu()  # 转换阶段在CPU进行
+        quantized_model = convert_fx(trained_model)
+        
+        # 处理设备兼容性
+        self.quantized_model = self._get_device_compatible_model(quantized_model)
         return self.quantized_model
-
-    def _train_qat_loop(self, model: nn.Module, train_loader: torch.utils.data.DataLoader):
-        model.train() # Ensure model is in training mode
-        # Model is already on self.device from the quantize method
-
-        optimizer = optim.Adam(model.parameters(), lr=self.learning_rate)
-        criterion = nn.CrossEntropyLoss()
-
-        for epoch in range(self.train_epochs):
-            epoch_loss = 0.0
-            correct_predictions = 0
-            total_samples = 0
-            
-            for batch_idx, (inputs, targets) in enumerate(train_loader):
+    
+    def _perform_qat_training(self, model: nn.Module, training_data: torch.utils.data.DataLoader, 
+                             epochs: int = 3) -> nn.Module:
+        """执行QAT训练"""
+        model.train()
+        optimizer = optim.Adam(model.parameters(), lr=0.0001)
+        criterion = nn.CrossEntropyLoss().to(self.device)
+        
+        print(f"Starting QAT training for {epochs} epochs on {self.device}")
+        
+        for epoch in range(epochs):
+            total_loss = 0.0
+            for batch_idx, (inputs, targets) in enumerate(training_data):
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 
                 optimizer.zero_grad()
@@ -401,29 +547,63 @@ class QATQuantizer(BaseQuantizer):
                 loss.backward()
                 optimizer.step()
                 
-                epoch_loss += loss.item() * inputs.size(0)
-                _, predicted = outputs.max(1)
-                total_samples += targets.size(0)
-                correct_predictions += predicted.eq(targets).sum().item()
+                total_loss += loss.item()
                 
-                if batch_idx % 50 == 0: # Print progress every 50 batches
-                    print(f"  Epoch {epoch+1}/{self.train_epochs}, Batch {batch_idx}/{len(train_loader)} - Current Batch Loss: {loss.item():.4f}")
+                if batch_idx >= 100:  # 限制训练批次
+                    break
+            
+            avg_loss = total_loss / min(len(training_data), 100)
+            print(f"QAT Epoch {epoch+1}/{epochs}, Average Loss: {avg_loss:.4f}")
+        
+        return model
+    
+    def _get_example_inputs(self, data_loader: torch.utils.data.DataLoader) -> tuple:
+        """获取示例输入"""
+        for inputs, _ in data_loader:
+            return (inputs[:1].to(self.device),)
+        raise ValueError("Training data is empty")
+    
+    def _quantize_legacy_qat(self, model: nn.Module, training_data: torch.utils.data.DataLoader) -> nn.Module:
+        """传统QAT方法作为后备"""
+        if training_data is None:
+            raise ValueError("Training data is required for QAT")
+        
+        self.original_model = copy.deepcopy(model)
+        model_copy = copy.deepcopy(model)
+        model_copy.train()
+        
+        # 设置QAT配置
+        model_copy.qconfig = torch.quantization.get_default_qat_qconfig(self.backend)
+        
+        # 准备QAT
+        torch.quantization.prepare_qat(model_copy, inplace=True)
+        optimizer = optim.Adam(model.parameters(), lr=self.learning_rate)
+        criterion = nn.CrossEntropyLoss()
 
-            avg_epoch_loss = epoch_loss / total_samples if total_samples > 0 else 0.0
-            epoch_accuracy = 100. * correct_predictions / total_samples if total_samples > 0 else 0.0
-            print(f"Epoch {epoch+1}/{self.train_epochs} - Avg Loss: {avg_epoch_loss:.4f}, Accuracy: {epoch_accuracy:.2f}%")
-
-    def convert_qat_model(self, qat_model: nn.Module) -> nn.Module:
-        """
-        Converts a QAT-trained model to a fully quantized model.
-        Assumes qat_model has already been trained.
-        """
-        print("Converting externally trained QAT model to quantized model (on CPU)...")
-        qat_model_cpu = qat_model.to('cpu')
-        qat_model_cpu.eval()
-        quantized_model = convert_fx(qat_model_cpu)
-        self.quantized_model = quantized_model # Update self.quantized_model
-        print("External QAT model converted successfully.")
+        # QAT训练
+        for epoch in range(self.train_epochs):
+            running_loss = 0.0
+            for i, data in enumerate(training_data, 0):
+                inputs, labels = data
+                
+                inputs, labels = inputs.to(self.device), labels.to(self.device)
+                
+                optimizer.zero_grad()
+                outputs = model_copy(inputs)
+                loss = nn.CrossEntropyLoss()(outputs, labels)
+                loss.backward()
+                optimizer.step()
+                
+                running_loss += loss.item()
+                if i % 20 == 19:    # 每20个mini-batches打印一次
+                    print(f"[{epoch + 1}, {i + 1}] loss: {running_loss / 20:.3f}")
+                    running_loss = 0.0
+        
+        # 转换为量化模型
+        model_copy.eval()
+        quantized_model = torch.quantization.convert(model_copy)
+        
+        self.quantized_model = quantized_model
         return quantized_model
 
 
