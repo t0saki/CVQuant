@@ -73,7 +73,10 @@ def parse_arguments():
                        help='Number of warmup iterations for timing')
     parser.add_argument('--benchmark-iterations', type=int, default=500,
                        help='Number of benchmark iterations for timing')
-    
+
+    # Other model configuration
+    parser.add_argument('--low-rank-epsilon', type=float, default=0.3,
+                       help='Epsilon for Low Rank Factorization')
     return parser.parse_args()
 
 
@@ -96,7 +99,7 @@ def setup_device(device_arg: str) -> torch.device:
 
 
 def load_and_prepare_model(model_name: str, dataset_name: str, device: torch.device, 
-                          enable_finetuning: bool = True) -> nn.Module:
+                          enable_finetuning: bool = True, low_rank_epsilon: float = 0.3) -> nn.Module:
     """Load and prepare model for quantization with optional fine-tuning"""
     print(f"\nLoading model: {model_name}")
     
@@ -104,7 +107,7 @@ def load_and_prepare_model(model_name: str, dataset_name: str, device: torch.dev
     dataset_name, num_classes = adjust_dataset_for_model(dataset_name, model_name)
     
     # Load model with fine-tuning support
-    model_loader = ModelLoader(num_classes=num_classes, device=device, enable_finetuning=enable_finetuning)
+    model_loader = ModelLoader(num_classes=num_classes, device=device, enable_finetuning=enable_finetuning, low_rank_epsilon=low_rank_epsilon)
     
     if enable_finetuning:
         print(f"Fine-tuning enabled for dataset: {dataset_name}")
@@ -325,7 +328,7 @@ def main():
 
         # Load and prepare model with optional fine-tuning
         enable_finetuning = args.enable_finetuning and not args.disable_finetuning
-        model = load_and_prepare_model(args.model, args.dataset, device, enable_finetuning)
+        model = load_and_prepare_model(args.model, args.dataset, device, enable_finetuning, args.low_rank_epsilon)
         
         # Load data
         print(f"\nLoading dataset: {args.dataset}")

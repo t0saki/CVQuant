@@ -72,50 +72,121 @@ class LowRankFactorization:
 
         return layer, old_size, old_size
 
+    # def _compress_conv2d_layer(self, layer: nn.Conv2d, epsilon: float) -> Tuple[nn.Module, int, int]:
+    #     """压缩Conv2d层"""
+    #     W = layer.weight.data.cpu()
+    #     OC, IC, kH, kW = W.shape
+    #
+    #     # 重塑为2D矩阵
+    #     W_flat = W.view(OC, -1)
+    #
+    #     # 运行SVD
+    #     U, S, Vh = torch.linalg.svd(W_flat, full_matrices=False)
+    #
+    #     # 找到保留指定能量的秩
+    #     energy = torch.cumsum(S ** 2, dim=0) / torch.sum(S ** 2)
+    #     rank = torch.searchsorted(energy, 1 - epsilon).item() + 1
+    #
+    #     # 检查分解是否能减少参数数量
+    #     old_size = W.numel()
+    #     new_size = rank * (IC * kH * kW + OC)
+    #
+    #     if new_size < old_size:
+    #         # 定义低秩分解
+    #         U_r = U[:, :rank] @ torch.diag(S[:rank])
+    #         V_r = Vh[:rank, :]
+    #
+    #         # 创建两个卷积层替换原始层
+    #         conv1 = nn.Conv2d(
+    #             in_channels=IC,
+    #             out_channels=rank,
+    #             kernel_size=1,
+    #             stride=1,
+    #             padding=0,
+    #             bias=False
+    #         )
+    #         conv2 = nn.Conv2d(
+    #             in_channels=rank,
+    #             out_channels=OC,
+    #             kernel_size=(kH, kW),
+    #             stride=layer.stride,
+    #             padding=layer.padding,
+    #             bias=(layer.bias is not None)
+    #         )
+    #
+    #         conv1.weight.data = V_r.view(rank, IC, kH, kW).to(self.device)
+    #         conv2.weight.data = U_r.view(OC, rank, 1, 1).to(self.device)
+    #         if layer.bias is not None:
+    #             conv2.bias.data = layer.bias.data.to(self.device)
+    #
+    #         return nn.Sequential(conv1, conv2), old_size, new_size
+    #
+    #     return layer, old_size, old_size
+
     def _compress_conv2d_layer(self, layer: nn.Conv2d, epsilon: float) -> Tuple[nn.Module, int, int]:
         """压缩Conv2d层"""
         W = layer.weight.data.cpu()
         OC, IC, kH, kW = W.shape
 
+        # 对于 1x1 卷积，SVD 分解没有意义，直接返回
+        if kH == 1 and kW == 1:
+            return layer, W.numel(), W.numel()
+
         # 重塑为2D矩阵
         W_flat = W.view(OC, -1)
-
         # 运行SVD
         U, S, Vh = torch.linalg.svd(W_flat, full_matrices=False)
-
         # 找到保留指定能量的秩
         energy = torch.cumsum(S ** 2, dim=0) / torch.sum(S ** 2)
         rank = torch.searchsorted(energy, 1 - epsilon).item() + 1
 
         # 检查分解是否能减少参数数量
+        # 新参数 = (IC * kH * kW * rank) + (rank * OC * 1 * 1)
         old_size = W.numel()
         new_size = rank * (IC * kH * kW + OC)
 
         if new_size < old_size:
-            # 定义低秩分解
-            U_r = U[:, :rank] @ torch.diag(S[:rank])
+            # 定义低秩分解的权重
+            # Vh (r, IC*kH*kW) -> V_r_w (r, IC, kH, kW)
+            # U (OC, r) @ S(r) -> U_r_w (OC, r, 1, 1)
+            U_r = U[:, :rank]
+            S_r = torch.diag(S[:rank])
             V_r = Vh[:rank, :]
 
+            # 将奇异值 S 合并到其中一个矩阵中，通常是第一个或第二个
+            # 这里我们合并到 U 中，与原始代码类似
+            U_r_w = (U_r @ S_r).view(OC, rank, 1, 1)
+            V_r_w = V_r.view(rank, IC, kH, kW)
+
+            # --- 这是修正的关键部分 ---
             # 创建两个卷积层替换原始层
+            # conv1: kxk 卷积，继承原始层的 stride 和 padding，但不使用偏置
+            # conv2: 1x1 卷积，恢复通道数，并应用原始的偏置
+
             conv1 = nn.Conv2d(
                 in_channels=IC,
                 out_channels=rank,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                bias=False
+                kernel_size=(kH, kW),  # <--- 修正: 定义与权重匹配 (kxk)
+                stride=layer.stride,  # <--- 修正: stride 和 padding 在第一个卷积中
+                padding=layer.padding,
+                groups=layer.groups,
+                dilation=layer.dilation,
+                bias=False  # <--- 修正: 偏置移到第二个卷积
             )
+
             conv2 = nn.Conv2d(
                 in_channels=rank,
                 out_channels=OC,
-                kernel_size=(kH, kW),
-                stride=layer.stride,
-                padding=layer.padding,
-                bias=(layer.bias is not None)
+                kernel_size=1,  # <--- 修正: 定义与权重匹配 (1x1)
+                stride=1,
+                padding=0,
+                bias=(layer.bias is not None)  # <--- 修正: 在这里应用偏置
             )
 
-            conv1.weight.data = V_r.view(rank, IC, kH, kW).to(self.device)
-            conv2.weight.data = U_r.view(OC, rank, 1, 1).to(self.device)
+            # 权重分配现在与层定义一致
+            conv1.weight.data = V_r_w.to(self.device)
+            conv2.weight.data = U_r_w.to(self.device)
+
             if layer.bias is not None:
                 conv2.bias.data = layer.bias.data.to(self.device)
 

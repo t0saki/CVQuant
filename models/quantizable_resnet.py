@@ -397,14 +397,14 @@ def resnet50_quantizable(pretrained: bool = False, progress: bool = True, **kwar
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    # Check if we need CIFAR-10 adaptation
-    num_classes = kwargs.get('num_classes', 1000)
-    if num_classes == 10:
-        # Use CIFAR-10 adapted version
-        return _cifar_resnet('resnet50', Bottleneck, [3, 4, 6, 3], False, progress, **kwargs)
-    else:
-        # Use standard ImageNet version
-        return _resnet('resnet50', Bottleneck, [3, 4, 6, 3], pretrained, progress, **kwargs)
+    # # Check if we need CIFAR-10 adaptation
+    # num_classes = kwargs.get('num_classes', 1000)
+    # if num_classes == 10:
+    #     # Use CIFAR-10 adapted version
+    #     return _cifar_resnet('resnet50', Bottleneck, [3, 4, 6, 3], False, progress, **kwargs)
+    # else:
+    # Use standard ImageNet version
+    return _resnet('resnet50', Bottleneck, [3, 4, 6, 3], pretrained, progress, **kwargs)
 
 
 def resnet18_quantizable(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
@@ -417,11 +417,11 @@ def resnet18_quantizable(pretrained: bool = False, progress: bool = True, **kwar
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    # Check if we need CIFAR-10 adaptation
-    num_classes = kwargs.get('num_classes', 1000)
-    if num_classes == 10:
-        # Use CIFAR-10 adapted version
-        return _cifar_resnet('resnet18', BasicBlock, [2, 2, 2, 2], False, progress, **kwargs)
-    else:
-        # Use standard ImageNet version
-        return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+    # # Check if we need CIFAR-10 adaptation
+    # num_classes = kwargs.get('num_classes', 1000)
+    # if num_classes == 10:
+    #     # Use CIFAR-10 adapted version
+    #     return _cifar_resnet('resnet18', BasicBlock, [2, 2, 2, 2], False, progress, **kwargs)
+    # else:
+    # Use standard ImageNet version
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
