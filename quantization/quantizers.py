@@ -3,18 +3,19 @@ Quantization methods implementation for PyTorch models
 """
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from torch.quantization import quantize_dynamic, prepare, convert
+from torch.quantization import QConfig, default_observer, default_weight_observer, get_default_qat_qconfig
+import torch.ao.quantization as ao_quantization
+from torch.ao.quantization import get_default_qconfig_mapping, QConfigMapping
+from torch.ao.quantization import get_default_qat_qconfig_mapping
+from torch.ao.quantization.quantize_fx import prepare_fx, convert_fx, prepare_qat_fx
+import torch.quantization.quantize_fx as quantize_fx
 import copy
 import time
-import torch.optim as optim
-import tempfile  # Added import
-import traceback # Added import
-from torch.quantization import QConfig, default_observer, default_weight_observer, get_default_qat_qconfig
-from torch.quantization.quantize_fx import prepare_fx, convert_fx, prepare_qat_fx
-from torch.ao.quantization import QConfigMapping
-from torch.ao.quantization import get_default_qconfig_mapping, get_default_qat_qconfig_mapping
-from torch.ao.quantization.quantize_fx import prepare_fx, convert_fx, prepare_qat_fx
-from typing import Dict, Any, Callable, Optional, Tuple
-import torch.ao.quantization as ao_quantization
+import traceback
+from typing import Dict, List, Any
+import tempfile
 
 class BaseQuantizer:
     """Base class for all quantization methods"""
@@ -160,7 +161,7 @@ class BaseQuantizer:
         # Default implementation, can be overridden by subclasses if specific handling is needed
         model.eval()
         # model_device = next(model.parameters()).device
-        model_device = self.device if hasattr(model, 'device') else torch.device('cpu')
+        model_device = self.device
         model = model.to(model_device)  # Ensure model is on the correct device
         input_tensor = input_tensor.to(model_device)
 
@@ -714,87 +715,180 @@ class INT8Quantizer(BaseQuantizer):
 
 
 class QuantizationBenchmark(BaseQuantizer):
-    """Benchmark different quantization methods"""
+    """Benchmark multiple quantization methods"""
     
-    def __init__(self, device: torch.device = None, backend: str = 'fbgemm', **kwargs): # Added backend
-        super().__init__(device, **kwargs) # Call super init if it's inheriting
+    def __init__(self, device: torch.device = None, backend: str = 'fbgemm', **kwargs):
+        super().__init__(device, **kwargs)
         self.device = device or torch.device('cpu')
-        self.backend = backend # Store backend
+        self.backend = backend
         self.results = {}
-        print(f"QuantizationBenchmark initialized with device: {self.device}, backend: {self.backend}")
+        self.model_name = kwargs.get('model_name', 'unknown')
     
+    def _load_original_resnet_for_lrf(self, lrf_model: nn.Module) -> nn.Module:
+        """
+        Load corresponding original ResNet model for LRF baseline comparison
+        
+        Args:
+            lrf_model: LRF ResNet model
+            
+        Returns:
+            Original ResNet model corresponding to the LRF model
+        """
+        # Import here to avoid circular imports
+        import sys
+        import os
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        
+        from models.model_loader import ModelLoader
+        
+        # Determine the corresponding original ResNet model
+        if 'resnet18' in self.model_name.lower():
+            original_model_name = 'resnet18_quantizable'
+        elif 'resnet50' in self.model_name.lower():
+            original_model_name = 'resnet50_quantizable'
+        else:
+            print(f"Warning: Could not determine original ResNet for {self.model_name}, using LRF model as baseline")
+            return lrf_model
+        
+        # Get number of classes from LRF model
+        if hasattr(lrf_model, 'fc') and hasattr(lrf_model.fc, 'out_features'):
+            num_classes = lrf_model.fc.out_features
+        else:
+            num_classes = 1000  # Default ImageNet classes
+        
+        # Load the original ResNet model
+        try:
+            model_loader = ModelLoader(num_classes=num_classes, device=self.device, enable_finetuning=False)
+            original_model = model_loader.load_model(original_model_name, pretrained=True)
+            original_model = original_model.to(self.device)
+            original_model.eval()
+            
+            print(f"Successfully loaded {original_model_name} as baseline for LRF comparison")
+            return original_model
+            
+        except Exception as e:
+            print(f"Error loading original ResNet {original_model_name}: {e}")
+            print("Using LRF model as baseline instead")
+            return lrf_model
+
     def benchmark_quantization_methods(self, model: nn.Module, 
                                      calibration_data: torch.utils.data.DataLoader,
                                      evaluation_data: torch.utils.data.DataLoader,
                                      methods: list = None) -> Dict[str, Dict[str, Any]]:
         """
-        Benchmark different quantization methods on a given model.
-
-        Args:
-            model: Original model to quantize and benchmark.
-            calibration_data: DataLoader for calibration (static, FX) or training (QAT).
-            evaluation_data: DataLoader for evaluating model accuracy and performance.
-            methods: List of quantization method names to benchmark (e.g., ['dynamic', 'static', 'qat']).
-                     If None, all available methods are benchmarked.
-
-        Returns:
-            A dictionary containing benchmark results for each method.
-        """
-        self.results = {}
-        original_model_size = self._get_model_size(model) # Correctly get original model size
+        Benchmark multiple quantization methods
         
-        # Get an example input tensor for inference time measurement
-        # Ensure evaluation_data is not empty and yields (inputs, targets) or just inputs
-        try:
-            example_batch_eval = next(iter(evaluation_data))
-            if isinstance(example_batch_eval, (list, tuple)) and len(example_batch_eval) > 0:
-                example_input, _ = example_batch_eval
-            else: # Assuming loader yields only inputs
-                example_input = example_batch_eval
+        Args:
+            model: Original model to quantize
+            calibration_data: Data for calibration (used for static quantization)
+            evaluation_data: Data for evaluation
+            methods: List of quantization methods to benchmark
             
-            if not isinstance(example_input, torch.Tensor):
-                raise ValueError(f"Example input for benchmark must be a torch.Tensor, got {type(example_input)}")
-
-        except StopIteration:
-            print("Warning: evaluation_data is empty. Cannot get example_input for inference time measurement.")
-            example_input = None # Or create a dummy tensor based on model's expected input if known
+        Returns:
+            Dictionary with results for each method
+        """
+        if methods is None:
+            methods = ['dynamic', 'static', 'qat']
+        
+        self.results = {}
+        
+        # Get example input for timing measurements
+        example_input = None
+        try:
+            for inputs, _ in calibration_data:
+                example_input = inputs[:1]  # Take first sample
+                break
         except Exception as e:
-            print(f"Warning: Error getting example_input from evaluation_data: {e}. Inference time might not be measured.")
-            example_input = None
-
-        # Evaluate original model
-        print("\nEvaluating original model...")
+            print(f"Warning: Could not get example input: {e}")
+        
+        # Evaluate original model first
+        print("Evaluating original (unquantized) model...")
+        
+        # For LRF models, use the original ResNet as baseline instead of LRF model
+        original_model = model
+        lrf_model = None
+        is_lrf_model = 'low_rank' in self.model_name
+        
+        if is_lrf_model:
+            print(f"Detected LRF model: {self.model_name}")
+            print("Loading corresponding original ResNet as baseline...")
+            original_model = self._load_original_resnet_for_lrf(model)
+            lrf_model = model  # Keep reference to LRF model
+        
+        # Evaluate original ResNet baseline
+        original_eval_metrics = self.evaluate_model(original_model, evaluation_data)
+        
         if example_input is not None:
-            original_time_stats = self.measure_inference_time(model.to(self.device), example_input.to(self.device))
+            # Move example input to the same device as the model
+            model_device = next(original_model.parameters()).device
+            original_time_stats = self.measure_inference_time(original_model, example_input.to(model_device))
         else:
             original_time_stats = {k: 0 for k in ['mean_time_ms', 'min_time_ms', 'max_time_ms', 'std_time_ms']}
-        original_eval_metrics = self.evaluate_model(model.to(self.device), evaluation_data)
+
+        original_size_mb = self._get_model_size(original_model)
         
         self.results['original'] = {
             'accuracy': original_eval_metrics.get('accuracy', 0.0),
             'loss': original_eval_metrics.get('loss', 0.0),
-            'model_size_mb': original_model_size,
+            'model_size_mb': original_size_mb,
+            'compression_ratio': 1.0,
+            'speedup': 1.0,
             **original_time_stats
         }
         print(f"Original Model - Accuracy: {self.results['original']['accuracy']:.2f}%, "
-              f"Size: {original_model_size:.2f}MB, "
+              f"Size: {original_size_mb:.2f}MB, "
               f"Inference Time: {original_time_stats.get('mean_time_ms', 0.0):.2f}ms")
+
+        # For LRF models, also evaluate the LRF model itself (unquantized)
+        if is_lrf_model and lrf_model is not None:
+            print("\nEvaluating LRF (unquantized) model...")
+            lrf_eval_metrics = self.evaluate_model(lrf_model, evaluation_data)
+            
+            if example_input is not None:
+                lrf_model_device = next(lrf_model.parameters()).device
+                lrf_time_stats = self.measure_inference_time(lrf_model, example_input.to(lrf_model_device))
+            else:
+                lrf_time_stats = {k: 0 for k in ['mean_time_ms', 'min_time_ms', 'max_time_ms', 'std_time_ms']}
+
+            lrf_size_mb = self._get_model_size(lrf_model)
+            
+            # Calculate LRF metrics relative to original
+            lrf_speedup = original_time_stats.get('mean_time_ms', 0.0) / lrf_time_stats.get('mean_time_ms', 1.0) if lrf_time_stats.get('mean_time_ms', 0.0) > 0 else 0.0
+            lrf_compression = original_size_mb / lrf_size_mb if lrf_size_mb > 0 else 0.0
+            
+            self.results['lrf'] = {
+                'accuracy': lrf_eval_metrics.get('accuracy', 0.0),
+                'loss': lrf_eval_metrics.get('loss', 0.0),
+                'model_size_mb': lrf_size_mb,
+                'compression_ratio': lrf_compression,
+                'speedup': lrf_speedup,
+                **lrf_time_stats
+            }
+            print(f"LRF Model - Accuracy: {self.results['lrf']['accuracy']:.2f}%, "
+                  f"Size: {lrf_size_mb:.2f}MB, "
+                  f"Inference Time: {lrf_time_stats.get('mean_time_ms', 0.0):.2f}ms, "
+                  f"Speedup: {lrf_speedup:.2f}x, "
+                  f"Compression: {lrf_compression:.2f}x")
 
         # Get quantizers using the stored backend
         all_quantizers = get_available_quantizers(backend=self.backend, device=self.device, model_name=self.model_name)
         
-        if methods is None:
-            methods_to_run = list(all_quantizers.keys())
-        else:
-            methods_to_run = [m for m in methods if m in all_quantizers]
-
-        for method_name in methods_to_run:
+        # Use the actual model (LRF model) for quantization, not the original ResNet
+        model_to_quantize = lrf_model if is_lrf_model else model
+        
+        for method_name in methods:
             quantizer = all_quantizers[method_name]
-            print(f"\nBenchmarking {method_name} quantization...")
+            
+            # For LRF models, add 'lrf_' prefix to method names for clarity
+            result_key = f"lrf_{method_name}" if is_lrf_model else method_name
+            
+            print(f"\nBenchmarking {result_key} quantization...")
             
             try:
                 # Quantize model
-                quantized_model = quantizer.quantize(copy.deepcopy(model), calibration_data)
+                quantized_model = quantizer.quantize(copy.deepcopy(model_to_quantize), calibration_data)
                 
                 # Check if the quantized model has parameters
                 params = list(quantized_model.parameters())
@@ -821,7 +915,7 @@ class QuantizationBenchmark(BaseQuantizer):
                     
                     model_size_mb = self._get_model_size(quantized_model) # This might return 0 if it relies on parameters
 
-                    self.results[method_name] = {
+                    self.results[result_key] = {
                         'accuracy': eval_metrics.get('accuracy', 0.0),
                         'loss': eval_metrics.get('loss', 0.0),
                         'model_size_mb': model_size_mb,
@@ -834,13 +928,13 @@ class QuantizationBenchmark(BaseQuantizer):
                         'compression_ratio': 0.0
                     }
                     print(f"Type of problematic quantized_model: {type(quantized_model)}")
-                    print(f"{method_name.capitalize()} Quantized Model (no params) - Accuracy: {self.results[method_name]['accuracy']:.2f}%, "
+                    print(f"{result_key.capitalize()} Quantized Model (no params) - Accuracy: {self.results[result_key]['accuracy']:.2f}%, "
                           f"Size: {model_size_mb:.2f}MB, "
                           f"Inference Time: {time_stats.get('mean_time_ms', 0.0):.2f}ms")
                     continue
 
                 quantized_model_device = params[0].device
-                print(f"Evaluating {method_name} quantized model on device: {quantized_model_device}")
+                print(f"Evaluating {result_key} quantized model on device: {quantized_model_device}")
                 eval_metrics = quantizer.evaluate_model(quantized_model, evaluation_data)
                 
                 if example_input is not None:
@@ -858,7 +952,7 @@ class QuantizationBenchmark(BaseQuantizer):
                 original_size = self.results.get('original', {}).get('model_size_mb', 0.0)
                 compression_ratio_val = original_size / model_size_mb if model_size_mb > 0 and original_size > 0 else 0.0
                 
-                self.results[method_name] = {
+                self.results[result_key] = {
                     'accuracy': eval_metrics.get('accuracy', 0.0),
                     'loss': eval_metrics.get('loss', 0.0),
                     'model_size_mb': model_size_mb,
@@ -866,7 +960,7 @@ class QuantizationBenchmark(BaseQuantizer):
                     'speedup': speedup_ratio,
                     **time_stats
                 }
-                print(f"{method_name.capitalize()} Quantized Model - Accuracy: {self.results[method_name]['accuracy']:.2f}%, "
+                print(f"{result_key.capitalize()} Quantized Model - Accuracy: {self.results[result_key]['accuracy']:.2f}%, "
                       f"Size: {model_size_mb:.2f}MB, "
                       f"Inference Time: {time_stats.get('mean_time_ms', 0.0):.2f}ms, "
                       f"Speedup: {speedup_ratio:.2f}x, "
@@ -875,7 +969,7 @@ class QuantizationBenchmark(BaseQuantizer):
             except Exception as e:
                 print(f"Error benchmarking {method_name}: {e}")
                 traceback.print_exc()
-                self.results[method_name] = {
+                self.results[result_key] = {
                     'accuracy': 0.0, 'loss': 0.0, 'model_size_mb': 0.0, 
                     'error': str(e),
                     'mean_time_ms': 0.0, 'min_time_ms': 0.0, 'max_time_ms': 0.0, 'std_time_ms': 0.0, # Ensure keys exist
@@ -1080,17 +1174,13 @@ class OfficialQuantizedQuantizer(BaseQuantizer):
             'std_time_ms': (sum([(t - sum(times)/len(times))**2 for t in times]) / len(times))**0.5
         }
 
-def get_available_quantizers(backend: str = 'qnnpack', device: torch.device = None, model_name: str = None) -> Dict[
-    str, BaseQuantizer]:  # Added backend and device
+def get_available_quantizers(backend: str = 'qnnpack', device: torch.device = None, model_name: str = None) -> Dict[str, BaseQuantizer]:
     """Get dictionary of available quantizers"""
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # QAT training parameters (epochs, lr) can be further customized if needed,
-    # e.g., by passing them as arguments here or reading from a config.
-    # For now, QATQuantizer uses its defaults or those passed to its constructor.
-    qat_train_epochs = 10  # Example: could be configurable
-    qat_learning_rate = 1e-5  # Example: could be configurable
+    qat_train_epochs = 10
+    qat_learning_rate = 1e-5
 
     return {
         'dynamic': DynamicQuantizer(device, backend=backend, model_name=model_name),
