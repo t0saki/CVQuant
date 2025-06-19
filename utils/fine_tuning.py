@@ -14,10 +14,23 @@ from tqdm import tqdm
 class FineTuner:
     """Fine-tune pre-trained models on specific datasets"""
     
-    def __init__(self, device: torch.device = None, weights_dir: str = "./fine_tuned_weights"):
+    def __init__(self, device: torch.device = None, weights_dir: str = "./fine_tuned_weights", 
+                 enable_distillation: bool = False):
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.weights_dir = weights_dir
+        self.enable_distillation = enable_distillation
         os.makedirs(weights_dir, exist_ok=True)
+        
+        # Initialize distiller if enabled
+        self.distiller = None
+        if enable_distillation:
+            try:
+                from .distillation import KnowledgeDistiller
+                self.distiller = KnowledgeDistiller(device=self.device)
+            except ImportError as e:
+                print(f"Warning: Could not import distillation module: {e}")
+                print("Knowledge distillation will be disabled")
+                self.enable_distillation = False
     
     def get_finetuned_weights_path(self, model_name: str, dataset_name: str) -> str:
         """Get the path for fine-tuned weights"""
@@ -245,36 +258,211 @@ class FineTuner:
             return base_config
         
         return configs.get(dataset_name.lower(), configs['cifar10'])
+    
+    def get_distilled_weights_path(self, student_model_name: str, teacher_model_name: str, dataset_name: str) -> str:
+        """Get the path for distilled weights"""
+        if self.distiller:
+            return self.distiller.get_distilled_weights_path(student_model_name, teacher_model_name, dataset_name)
+        return os.path.join(self.weights_dir, f"{student_model_name}_distilled_from_{teacher_model_name}_{dataset_name}.pth")
+    
+    def has_distilled_weights(self, student_model_name: str, teacher_model_name: str, dataset_name: str) -> bool:
+        """Check if distilled weights exist for the model combination"""
+        if self.distiller:
+            return self.distiller.has_distilled_weights(student_model_name, teacher_model_name, dataset_name)
+        weights_path = self.get_distilled_weights_path(student_model_name, teacher_model_name, dataset_name)
+        return os.path.exists(weights_path)
+    
+    def load_distilled_weights(self, student_model: nn.Module, student_model_name: str, 
+                             teacher_model_name: str, dataset_name: str) -> nn.Module:
+        """Load distilled weights into the student model"""
+        if self.distiller:
+            return self.distiller.load_distilled_weights(student_model, student_model_name, teacher_model_name, dataset_name)
+        
+        weights_path = self.get_distilled_weights_path(student_model_name, teacher_model_name, dataset_name)
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(f"Distilled weights not found at {weights_path}")
+        
+        print(f"Loading distilled weights from {weights_path}")
+        checkpoint = torch.load(weights_path, map_location=self.device)
+        
+        if 'student_state_dict' in checkpoint:
+            student_model.load_state_dict(checkpoint['student_state_dict'])
+        else:
+            student_model.load_state_dict(checkpoint)
+        
+        return student_model
+    
+    def distill_model(self, teacher_model: nn.Module, student_model: nn.Module,
+                     teacher_model_name: str, student_model_name: str, dataset_name: str,
+                     auto_config: bool = True, **kwargs) -> nn.Module:
+        """
+        Perform knowledge distillation from teacher to student model
+        
+        Args:
+            teacher_model: Pre-trained teacher model
+            student_model: Student model to be trained
+            teacher_model_name: Name of the teacher model
+            student_model_name: Name of the student model
+            dataset_name: Name of the dataset
+            auto_config: Whether to use automatic configuration
+            **kwargs: Additional distillation parameters
+            
+        Returns:
+            Distilled student model
+        """
+        if not self.enable_distillation or not self.distiller:
+            print("Knowledge distillation is disabled, returning student model as-is")
+            return student_model
+        
+        try:
+            # Import here to avoid circular imports
+            from .distillation import create_distillation_data_loaders
+            
+            # Get distillation configuration
+            if auto_config:
+                config = self.distiller.get_distillation_config(teacher_model_name, student_model_name, dataset_name)
+                # Override with any provided kwargs
+                config.update(kwargs)
+            else:
+                config = kwargs
+            
+            # Create data loaders for distillation
+            train_loader, val_loader = create_distillation_data_loaders(
+                dataset_name=dataset_name,
+                batch_size=config.get('batch_size', 128)
+            )
+            
+            # Perform knowledge distillation
+            history = self.distiller.distill_knowledge(
+                teacher_model=teacher_model,
+                student_model=student_model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                teacher_model_name=teacher_model_name,
+                student_model_name=student_model_name,
+                dataset_name=dataset_name,
+                epochs=config.get('epochs', 15),
+                learning_rate=config.get('learning_rate', 0.001),
+                weight_decay=config.get('weight_decay', 1e-4),
+                temperature=config.get('temperature', 4.0),
+                alpha=config.get('alpha', 0.7)
+            )
+            
+            print(f"Knowledge distillation completed. Best validation accuracy: {history['best_val_acc']:.2f}%")
+            return student_model
+            
+        except Exception as e:
+            print(f"Knowledge distillation failed: {e}")
+            print("Returning student model as-is")
+            return student_model
 
 
 def create_fine_tuning_data_loaders(dataset_name: str, data_path: str = "./data", 
                                    batch_size: int = 128, 
-                                   train_split: float = 0.8) -> Tuple[DataLoader, DataLoader]:
+                                   train_split: float = 0.8,
+                                   total_samples: int = 50000) -> Tuple[DataLoader, DataLoader]:
     """
-    Create data loaders specifically for fine-tuning
+    Create data loaders specifically for fine-tuning with proper train/val split
     
     Args:
         dataset_name: Name of the dataset
         data_path: Path to dataset
         batch_size: Batch size for data loaders
         train_split: Fraction of data to use for training (rest for validation)
+        total_samples: Total number of samples to use (allows for larger datasets for teacher training)
         
     Returns:
         Tuple of (train_loader, val_loader)
     """
-    from .data_loader import create_data_loaders
-
-    sample_size = 50000
+    import torchvision
+    import torchvision.transforms as transforms
+    from torch.utils.data import DataLoader, Subset
+    import random
     
-    # For fine-tuning, we need separate train and validation sets
-    # We'll use the calibration loader as training and evaluation loader as validation
-    train_loader, val_loader = create_data_loaders(
-        dataset_name=dataset_name,
-        data_path=data_path,
-        batch_size=batch_size,
-        calibration_size=int(sample_size * train_split),  # Use more data for training
-        evaluation_size=int(sample_size * (1 - train_split)),  # Rest for validation
-        input_size=224
+    # Set random seed for reproducible splits
+    random.seed(42)
+    
+    # Define transforms
+    if dataset_name.lower() == 'cifar10':
+        train_transform = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(32, padding=4),
+            transforms.Resize((224, 224)),  # Resize to 224 for pretrained models
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        ])
+        
+        val_transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        ])
+        
+        # Load full training dataset
+        full_train_dataset = torchvision.datasets.CIFAR10(
+            root=data_path, train=True, download=True, transform=train_transform
+        )
+        
+        # Create validation dataset with different transform
+        val_dataset_base = torchvision.datasets.CIFAR10(
+            root=data_path, train=True, download=False, transform=val_transform
+        )
+        
+    elif dataset_name.lower() == 'cifar100':
+        train_transform = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(32, padding=4),
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
+        ])
+        
+        val_transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
+        ])
+        
+        full_train_dataset = torchvision.datasets.CIFAR100(
+            root=data_path, train=True, download=True, transform=train_transform
+        )
+        
+        val_dataset_base = torchvision.datasets.CIFAR100(
+            root=data_path, train=True, download=False, transform=val_transform
+        )
+    
+    else:
+        raise ValueError(f"Dataset {dataset_name} not supported for fine-tuning")
+    
+    # Create train/val split from training set only
+    total_train_samples = len(full_train_dataset)
+    
+    # Limit total samples if specified
+    if total_samples < total_train_samples:
+        sample_indices = random.sample(range(total_train_samples), total_samples)
+    else:
+        sample_indices = list(range(total_train_samples))
+    
+    # Split into train and validation
+    split_point = int(len(sample_indices) * train_split)
+    train_indices = sample_indices[:split_point]
+    val_indices = sample_indices[split_point:]
+    
+    print(f"Fine-tuning data split: {len(train_indices)} train, {len(val_indices)} val")
+    
+    # Create subsets
+    train_subset = Subset(full_train_dataset, train_indices)
+    val_subset = Subset(val_dataset_base, val_indices)
+    
+    # Create data loaders
+    train_loader = DataLoader(
+        train_subset, batch_size=batch_size, shuffle=True,
+        num_workers=4, pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        val_subset, batch_size=batch_size, shuffle=False,
+        num_workers=4, pin_memory=True
     )
     
     return train_loader, val_loader

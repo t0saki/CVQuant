@@ -64,6 +64,10 @@ def parse_arguments():
                        help='Enable automatic fine-tuning for dataset-specific weights')
     parser.add_argument('--disable-finetuning', action='store_true',
                        help='Disable fine-tuning and use only pretrained weights')
+    parser.add_argument('--enable-distillation', action='store_true',
+                       help='Enable knowledge distillation instead of fine-tuning')
+    parser.add_argument('--teacher-model', type=str, default=None,
+                       help='Teacher model name for knowledge distillation (auto-selected if not specified)')
     parser.add_argument('--device', type=str, default='auto',
                        choices=['auto', 'cpu', 'cuda', 'mps'],
                        help='Device to use for experiments')
@@ -99,19 +103,31 @@ def setup_device(device_arg: str) -> torch.device:
 
 
 def load_and_prepare_model(model_name: str, dataset_name: str, device: torch.device, 
-                          enable_finetuning: bool = True, low_rank_epsilon: float = 0.3) -> nn.Module:
-    """Load and prepare model for quantization with optional fine-tuning"""
+                          enable_finetuning: bool = True, low_rank_epsilon: float = 0.3,
+                          enable_distillation: bool = False, teacher_model_name: str = None) -> nn.Module:
+    """Load and prepare model for quantization with optional fine-tuning or knowledge distillation"""
     print(f"\nLoading model: {model_name}")
     
     # Adjust dataset and get number of classes
     dataset_name, num_classes = adjust_dataset_for_model(dataset_name, model_name)
     
-    # Load model with fine-tuning support
-    model_loader = ModelLoader(num_classes=num_classes, device=device, enable_finetuning=enable_finetuning, low_rank_epsilon=low_rank_epsilon)
+    # Load model with fine-tuning and/or distillation support
+    model_loader = ModelLoader(num_classes=num_classes, device=device, enable_finetuning=enable_finetuning, 
+                              low_rank_epsilon=low_rank_epsilon, enable_distillation=enable_distillation)
     
     if enable_finetuning:
-        print(f"Fine-tuning enabled for dataset: {dataset_name}")
-        model = model_loader.load_model(model_name, pretrained=True, dataset_name=dataset_name, auto_finetune=True)
+        if enable_distillation:
+            print(f"Knowledge distillation enabled for dataset: {dataset_name}")
+            if teacher_model_name:
+                print(f"Using teacher model: {teacher_model_name}")
+            else:
+                print("Auto-selecting teacher model")
+            model = model_loader.load_model(model_name, pretrained=True, dataset_name=dataset_name, 
+                                          auto_finetune=True, use_distillation=True, 
+                                          teacher_model_name=teacher_model_name)
+        else:
+            print(f"Fine-tuning enabled for dataset: {dataset_name}")
+            model = model_loader.load_model(model_name, pretrained=True, dataset_name=dataset_name, auto_finetune=True)
     else:
         model = model_loader.load_model(model_name, pretrained=True)
     
@@ -301,6 +317,10 @@ def main():
     print(f"Batch size: {args.batch_size}")
     print(f"Calibration size: {args.calibration_size}")
     print(f"Evaluation size: {args.evaluation_size}")
+    print(f"Fine-tuning enabled: {args.enable_finetuning and not args.disable_finetuning}")
+    print(f"Knowledge distillation enabled: {args.enable_distillation}")
+    if args.enable_distillation and args.teacher_model:
+        print(f"Teacher model: {args.teacher_model}")
     print("="*60)
     
     try:
@@ -326,9 +346,13 @@ def main():
         #     torchvision.datasets.MNIST(root=args.data_path, train=True, download=True)
         #     torchvision.datasets.MNIST(root=args.data_path, train=False, download=True)
 
-        # Load and prepare model with optional fine-tuning
+        # Load and prepare model with optional fine-tuning or knowledge distillation
         enable_finetuning = args.enable_finetuning and not args.disable_finetuning
-        model = load_and_prepare_model(args.model, args.dataset, device, enable_finetuning, args.low_rank_epsilon)
+        enable_distillation = args.enable_distillation
+        teacher_model_name = args.teacher_model
+        
+        model = load_and_prepare_model(args.model, args.dataset, device, enable_finetuning, 
+                                     args.low_rank_epsilon, enable_distillation, teacher_model_name)
         
         # Load data
         print(f"\nLoading dataset: {args.dataset}")
