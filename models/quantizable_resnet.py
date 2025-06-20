@@ -279,7 +279,7 @@ def _resnet(
                 if key.startswith('fc.') and kwargs.get('num_classes', 1000) != 1000:
                     continue
                 state_dict_filtered[key] = value
-        model.load_state_dict(state_dict_filtered, strict=False)
+        model.load_state_dict(state_dict_filtered)
         
         # Ensure consistent fc layer initialization for non-1000 class models
         if kwargs.get('num_classes', 1000) != 1000:
@@ -433,3 +433,4 @@ def resnet18_quantizable(pretrained: bool = False, progress: bool = True, **kwar
     # else:
     # Use standard ImageNet version
     return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
+

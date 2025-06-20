@@ -357,7 +357,7 @@ def _mobilenet_v3(
                     if key.startswith('classifier.') and kwargs.get('num_classes', 1000) != 1000:
                         continue
                     state_dict_filtered[key] = value
-            model.load_state_dict(state_dict_filtered, strict=False)
+            model.load_state_dict(state_dict_filtered)
     return model
 
 

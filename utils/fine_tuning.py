@@ -49,7 +49,7 @@ class FineTuner:
             raise FileNotFoundError(f"Fine-tuned weights not found at {weights_path}")
         
         print(f"Loading fine-tuned weights from {weights_path}")
-        checkpoint = torch.load(weights_path, map_location=self.device)
+        checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
         
         # Handle different checkpoint formats
         if 'model_state_dict' in checkpoint:
@@ -64,7 +64,7 @@ class FineTuner:
             print(f"Warning: Parameter count mismatch - Model: {model_params}, Checkpoint: {checkpoint_params}")
         
         # Load weights
-        model.load_state_dict(state_dict, strict=False)
+        model.load_state_dict(state_dict)
         
         # Verify loading worked correctly
         if 'best_val_acc' in checkpoint:
@@ -300,7 +300,7 @@ class FineTuner:
             raise FileNotFoundError(f"Distilled weights not found at {weights_path}")
         
         print(f"Loading distilled weights from {weights_path}")
-        checkpoint = torch.load(weights_path, map_location=self.device)
+        checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
         
         if 'student_state_dict' in checkpoint:
             student_model.load_state_dict(checkpoint['student_state_dict'])
