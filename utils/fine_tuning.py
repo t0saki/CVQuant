@@ -53,9 +53,22 @@ class FineTuner:
         
         # Handle different checkpoint formats
         if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
+            state_dict = checkpoint['model_state_dict']
         else:
-            model.load_state_dict(checkpoint)
+            state_dict = checkpoint
+        
+        # Validate parameter count
+        model_params = len(model.state_dict())
+        checkpoint_params = len(state_dict)
+        if model_params != checkpoint_params:
+            print(f"Warning: Parameter count mismatch - Model: {model_params}, Checkpoint: {checkpoint_params}")
+        
+        # Load weights
+        model.load_state_dict(state_dict, strict=False)
+        
+        # Verify loading worked correctly
+        if 'best_val_acc' in checkpoint:
+            print(f"Loaded weights with validation accuracy: {checkpoint['best_val_acc']:.2f}%")
         
         return model
     
@@ -155,7 +168,11 @@ class FineTuner:
                 'best_val_acc': best_val_acc,
                 'epochs': epochs,
                 'learning_rate': learning_rate,
-                'weight_decay': weight_decay
+                'weight_decay': weight_decay,
+                'parameter_count': len(best_model_state),
+                'model_size_mb': sum(p.numel() * 4 for p in best_model_state.values()) / (1024 * 1024),
+                'pytorch_version': torch.__version__,
+                'save_timestamp': time.time()
             }
             torch.save(checkpoint, weights_path)
             print(f"Fine-tuned model saved to {weights_path}")

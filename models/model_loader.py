@@ -16,6 +16,11 @@ class ModelLoader:
     
     def __init__(self, num_classes: int = 1000, device: torch.device = None, enable_finetuning: bool = True, 
                  low_rank_epsilon: float = 0.3, enable_distillation: bool = False):
+        # Set seed for consistent model initialization
+        torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(42)
+        
         self.num_classes = num_classes
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.enable_finetuning = enable_finetuning

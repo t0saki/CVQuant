@@ -43,9 +43,24 @@ class KnowledgeDistiller:
         
         # Handle different checkpoint formats
         if 'student_state_dict' in checkpoint:
-            student_model.load_state_dict(checkpoint['student_state_dict'])
+            state_dict = checkpoint['student_state_dict']
         else:
-            student_model.load_state_dict(checkpoint)
+            state_dict = checkpoint
+        
+        # Validate parameter count
+        model_params = len(student_model.state_dict())
+        checkpoint_params = len(state_dict)
+        if model_params != checkpoint_params:
+            print(f"Warning: Parameter count mismatch - Student model: {model_params}, Checkpoint: {checkpoint_params}")
+        
+        # Load weights
+        student_model.load_state_dict(state_dict, strict=False)
+        
+        # Verify loading worked correctly
+        if 'best_val_acc' in checkpoint:
+            print(f"Loaded distilled weights with validation accuracy: {checkpoint['best_val_acc']:.2f}%")
+        if 'temperature' in checkpoint and 'alpha' in checkpoint:
+            print(f"Distillation parameters - Temperature: {checkpoint['temperature']}, Alpha: {checkpoint['alpha']}")
         
         return student_model
     

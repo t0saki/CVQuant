@@ -280,6 +280,14 @@ def _resnet(
                     continue
                 state_dict_filtered[key] = value
         model.load_state_dict(state_dict_filtered, strict=False)
+        
+        # Ensure consistent fc layer initialization for non-1000 class models
+        if kwargs.get('num_classes', 1000) != 1000:
+            # Use a fixed seed to ensure consistent fc layer initialization
+            torch.manual_seed(42)
+            nn.init.kaiming_normal_(model.fc.weight, mode='fan_out', nonlinearity='relu')
+            if model.fc.bias is not None:
+                nn.init.constant_(model.fc.bias, 0)
     return model
 
 
