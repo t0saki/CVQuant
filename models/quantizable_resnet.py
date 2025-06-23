@@ -434,3 +434,14 @@ def resnet18_quantizable(pretrained: bool = False, progress: bool = True, **kwar
     # Use standard ImageNet version
     return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
 
+def resnet101_quantizable(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    """ResNet-101 model from
+    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
+    
+    This version is modified for quantization with QuantStub/DeQuantStub and FloatFunctional.
+    
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _resnet('resnet101', Bottleneck, [3, 4, 23, 3], pretrained, progress, **kwargs)

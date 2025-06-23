@@ -7,7 +7,7 @@ import torchvision.models as models
 from torchvision.models.quantization import resnet
 import timm
 from typing import Dict, Any, Optional
-from .quantizable_resnet import resnet50_quantizable, resnet18_quantizable
+from .quantizable_resnet import resnet50_quantizable, resnet18_quantizable, resnet101_quantizable
 from .quantizable_resnet_lrf import resnet18_low_rank, resnet50_low_rank
 from .quantizable_mobilenet import mobilenet_v3_small_quantizable, mobilenet_v3_large_quantizable
 
@@ -51,6 +51,7 @@ class ModelLoader:
             'resnet50': self._load_resnet50,
             'resnet18_quantizable': self._load_resnet18_quantizable,
             'resnet50_quantizable': self._load_resnet50_quantizable,
+            'resnet101_quantizable': self._load_resnet101_quantizable,
             "resnet18_low_rank": self._load_resnet18_low_rank,
             "resnet50_low_rank": self._load_resnet50_low_rank,
             'mobilenet_v2': self._load_mobilenet_v2,
@@ -202,6 +203,11 @@ class ModelLoader:
     def _load_resnet50_quantizable(self, pretrained: bool = True) -> nn.Module:
         """Load quantizable ResNet-50 model with QuantStub and DeQuantStub"""
         model = resnet50_quantizable(pretrained=pretrained, num_classes=self.num_classes)
+        return model
+    
+    def _load_resnet101_quantizable(self, pretrained: bool = True) -> nn.Module:
+        """Load quantizable ResNet-101 model with QuantStub and DeQuantStub"""
+        model = resnet101_quantizable(pretrained=pretrained, num_classes=self.num_classes)
         return model
 
     def _load_resnet18_low_rank(self, pretrained: bool = True) -> nn.Module:
