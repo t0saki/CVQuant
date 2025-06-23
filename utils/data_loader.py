@@ -55,7 +55,7 @@ class DatasetLoader:
         return transform
     
     def get_cifar10_dataset(self, batch_size: int = 32, num_workers: int = 4,
-                           train: bool = True) -> DataLoader:
+                            train: bool = True, input_size: int = 32) -> DataLoader:  # 添加 input_size 参数
         """
         Get CIFAR-10 dataset loader
         
@@ -71,26 +71,31 @@ class DatasetLoader:
             transform = transforms.Compose([
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomCrop(32, padding=4),
+                transforms.Resize(input_size),  # 训练时也统一尺寸
                 transforms.ToTensor(),
-                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+                transforms.Normalize(
+                    (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
             ])
         else:
+            # --- 这是关键修改 ---
             transform = transforms.Compose([
+                transforms.Resize(input_size),  # 添加 Resize
                 transforms.ToTensor(),
-                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+                transforms.Normalize(
+                    (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
             ])
-        
+
         dataset = torchvision.datasets.CIFAR10(
             root=self.data_path, train=train, download=self.download, transform=transform
         )
-        
+
         return DataLoader(
-            dataset, batch_size=batch_size, shuffle=train, 
+            dataset, batch_size=batch_size, shuffle=train,
             num_workers=num_workers, pin_memory=True
         )
-    
+
     def get_cifar100_dataset(self, batch_size: int = 32, num_workers: int = 4,
-                            train: bool = True) -> DataLoader:
+                             train: bool = True, input_size: int = 32) -> DataLoader:  # 添加 input_size 参数
         """
         Get CIFAR-100 dataset loader
         
@@ -106,19 +111,24 @@ class DatasetLoader:
             transform = transforms.Compose([
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomCrop(32, padding=4),
+                transforms.Resize(input_size),  # 训练时也统一尺寸
                 transforms.ToTensor(),
-                transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
+                transforms.Normalize(
+                    (0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
             ])
         else:
+            # --- 这是关键修改 ---
             transform = transforms.Compose([
+                transforms.Resize(input_size),  # 添加 Resize
                 transforms.ToTensor(),
-                transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
+                transforms.Normalize(
+                    (0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
             ])
-        
+
         dataset = torchvision.datasets.CIFAR100(
             root=self.data_path, train=train, download=self.download, transform=transform
         )
-        
+
         return DataLoader(
             dataset, batch_size=batch_size, shuffle=train,
             num_workers=num_workers, pin_memory=True
@@ -173,9 +183,9 @@ class DatasetLoader:
             num_workers=num_workers, pin_memory=True
         )
     
-    def get_calibration_data(self, dataset_name: str = "cifar10", 
-                           calibration_size: int = 1000,
-                           batch_size: int = 32, input_size: int = 224) -> DataLoader:
+    def get_calibration_data(self, dataset_name: str = "cifar10",
+                                 calibration_size: int = 1000,
+                                 batch_size: int = 32, input_size: int = 224) -> DataLoader:
         """
         Get calibration data for quantization
         
@@ -189,9 +199,13 @@ class DatasetLoader:
             DataLoader for calibration
         """
         if dataset_name.lower() == 'cifar10':
-            full_loader = self.get_cifar10_dataset(batch_size=batch_size, train=False)
+            # --- 传递 input_size ---
+            full_loader = self.get_cifar10_dataset(
+                batch_size=batch_size, train=False, input_size=input_size)
         elif dataset_name.lower() == 'cifar100':
-            full_loader = self.get_cifar100_dataset(batch_size=batch_size, train=False)
+            # --- 传递 input_size ---
+            full_loader = self.get_cifar100_dataset(
+                batch_size=batch_size, train=False, input_size=input_size)
         elif dataset_name.lower() == 'imagenet':
             full_loader = self.get_imagenet_subset(
                 batch_size=batch_size, subset_size=calibration_size,
@@ -217,8 +231,8 @@ class DatasetLoader:
             return full_loader
     
     def get_evaluation_data(self, dataset_name: str = "cifar10",
-                          evaluation_size: int = 5000,
-                          batch_size: int = 32, input_size: int = 224) -> DataLoader:
+                            evaluation_size: int = 5000,
+                            batch_size: int = 32, input_size: int = 224) -> DataLoader:
         """
         Get evaluation data for quantization experiments
         
@@ -232,9 +246,13 @@ class DatasetLoader:
             DataLoader for evaluation
         """
         if dataset_name.lower() == 'cifar10':
-            full_loader = self.get_cifar10_dataset(batch_size=batch_size, train=False)
+            # --- 传递 input_size ---
+            full_loader = self.get_cifar10_dataset(
+                batch_size=batch_size, train=False, input_size=input_size)
         elif dataset_name.lower() == 'cifar100':
-            full_loader = self.get_cifar100_dataset(batch_size=batch_size, train=False)
+            # --- 传递 input_size ---
+            full_loader = self.get_cifar100_dataset(
+                batch_size=batch_size, train=False, input_size=input_size)
         elif dataset_name.lower() == 'imagenet':
             full_loader = self.get_imagenet_subset(
                 batch_size=batch_size, subset_size=evaluation_size,

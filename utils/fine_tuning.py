@@ -53,18 +53,24 @@ class FineTuner:
         
         # Handle different checkpoint formats
         if 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
+            checkpoint_state_dict = checkpoint['model_state_dict']
         else:
-            state_dict = checkpoint
+            checkpoint_state_dict = checkpoint
         
-        # Validate parameter count
-        model_params = len(model.state_dict())
-        checkpoint_params = len(state_dict)
-        if model_params != checkpoint_params:
-            print(f"Warning: Parameter count mismatch - Model: {model_params}, Checkpoint: {checkpoint_params}")
+        # Get the model's state dict
+        model_dict = model.state_dict()
         
-        # Load weights
-        model.load_state_dict(state_dict)
+        # 1. Filter out unnecessary keys and keys with mismatched shapes
+        pretrained_dict = {
+            k: v for k, v in checkpoint_state_dict.items() 
+            if k in model_dict and v.shape == model_dict[k].shape
+        }
+        
+        # 2. Overwrite entries in the existing state dict
+        model_dict.update(pretrained_dict)
+        
+        # 3. Load the new state dict
+        model.load_state_dict(model_dict)
         
         # Verify loading worked correctly
         if 'best_val_acc' in checkpoint:
@@ -160,6 +166,44 @@ class FineTuner:
         # Save the best model
         if save_best and best_model_state is not None:
             weights_path = self.get_finetuned_weights_path(model_name, dataset_name)
+            
+            # Add detailed validation for fc layer saving
+            print(f"\n=== MODEL SAVING VALIDATION ===")
+            print(f"Model name: {model_name}")
+            print(f"Dataset: {dataset_name}")
+            print(f"Total parameters in state_dict: {len(best_model_state)}")
+            
+            # Specifically check fc layer parameters
+            fc_keys = [key for key in best_model_state.keys() if key.startswith('fc.')]
+            print(f"FC layer parameters found: {fc_keys}")
+            
+            if fc_keys:
+                for fc_key in fc_keys:
+                    fc_param = best_model_state[fc_key]
+                    print(f"  {fc_key}: shape={fc_param.shape}, dtype={fc_param.dtype}")
+                    if 'weight' in fc_key:
+                        print(f"    Weight stats: min={fc_param.min().item():.6f}, max={fc_param.max().item():.6f}, mean={fc_param.mean().item():.6f}")
+                    elif 'bias' in fc_key and fc_param is not None:
+                        print(f"    Bias stats: min={fc_param.min().item():.6f}, max={fc_param.max().item():.6f}, mean={fc_param.mean().item():.6f}")
+            else:
+                print("  WARNING: No fc layer parameters found in state_dict!")
+            
+            # Verify current model's fc layer before saving
+            current_model_state = model.state_dict()
+            current_fc_keys = [key for key in current_model_state.keys() if key.startswith('fc.')]
+            print(f"Current model FC parameters: {current_fc_keys}")
+            
+            # Ensure the best_model_state actually contains the fc layer
+            if fc_keys and current_fc_keys:
+                for fc_key in fc_keys:
+                    if fc_key in current_model_state:
+                        current_param = current_model_state[fc_key]
+                        saved_param = best_model_state[fc_key]
+                        if torch.equal(current_param, saved_param):
+                            print(f"  ✓ {fc_key}: Best model state matches current model")
+                        else:
+                            print(f"  ⚠ {fc_key}: Best model state differs from current model (this is expected)")
+            
             checkpoint = {
                 'model_state_dict': best_model_state,
                 'history': history,
@@ -172,11 +216,52 @@ class FineTuner:
                 'parameter_count': len(best_model_state),
                 'model_size_mb': sum(p.numel() * 4 for p in best_model_state.values()) / (1024 * 1024),
                 'pytorch_version': torch.__version__,
-                'save_timestamp': time.time()
+                'save_timestamp': time.time(),
+                # Add fc layer specific metadata for verification
+                'fc_layer_info': {
+                    'fc_keys': fc_keys,
+                    'fc_shapes': {key: best_model_state[key].shape for key in fc_keys} if fc_keys else {},
+                    'has_fc_layer': len(fc_keys) > 0
+                }
             }
+            
+            # Save the checkpoint
             torch.save(checkpoint, weights_path)
             print(f"Fine-tuned model saved to {weights_path}")
             print(f"Best validation accuracy: {best_val_acc:.2f}% at epoch {history['best_epoch']+1}")
+            
+            # Additional verification: immediately load and verify the saved model
+            try:
+                print(f"\n=== SAVE VERIFICATION ===")
+                saved_checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
+                saved_state_dict = saved_checkpoint['model_state_dict']
+                saved_fc_keys = [key for key in saved_state_dict.keys() if key.startswith('fc.')]
+                print(f"Verification: FC keys in saved file: {saved_fc_keys}")
+                
+                if 'fc_layer_info' in saved_checkpoint:
+                    fc_info = saved_checkpoint['fc_layer_info']
+                    print(f"Verification: FC layer metadata - has_fc_layer: {fc_info['has_fc_layer']}")
+                    print(f"Verification: FC shapes in metadata: {fc_info['fc_shapes']}")
+                
+                # Verify shapes match
+                if fc_keys and saved_fc_keys:
+                    for fc_key in fc_keys:
+                        if fc_key in saved_state_dict:
+                            original_shape = best_model_state[fc_key].shape
+                            saved_shape = saved_state_dict[fc_key].shape
+                            if original_shape == saved_shape:
+                                print(f"  ✓ {fc_key}: Shape verification passed ({saved_shape})")
+                            else:
+                                print(f"  ✗ {fc_key}: Shape mismatch! Original: {original_shape}, Saved: {saved_shape}")
+                        else:
+                            print(f"  ✗ {fc_key}: Missing in saved file!")
+                else:
+                    print("  ✗ FC layer verification failed - no FC keys found")
+                    
+                print(f"=== SAVE VERIFICATION COMPLETE ===\n")
+                
+            except Exception as e:
+                print(f"Error during save verification: {e}")
             
             # Load best weights back into model
             model.load_state_dict(best_model_state)
