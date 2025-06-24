@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Main script for quantization experiments on ResNet and MobileNet models
 """

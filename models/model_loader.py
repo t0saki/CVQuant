@@ -49,6 +49,7 @@ class ModelLoader:
         self.available_models = {
             'resnet18': self._load_resnet18,
             'resnet50': self._load_resnet50,
+            'resnet101': self._load_resnet101,
             'resnet18_quantizable': self._load_resnet18_quantizable,
             'resnet50_quantizable': self._load_resnet50_quantizable,
             'resnet101_quantizable': self._load_resnet101_quantizable,
@@ -191,6 +192,13 @@ class ModelLoader:
     def _load_resnet50(self, pretrained: bool = True) -> nn.Module:
         """Load ResNet-50 model"""
         model = resnet.resnet50(pretrained=pretrained)
+        if self.num_classes != 1000:
+            model.fc = nn.Linear(model.fc.in_features, self.num_classes)
+        return model
+    
+    def _load_resnet101(self, pretrained: bool = True) -> nn.Module:
+        """Load ResNet-101 model"""
+        model = resnet.resnext101_64x4d(pretrained=pretrained)
         if self.num_classes != 1000:
             model.fc = nn.Linear(model.fc.in_features, self.num_classes)
         return model

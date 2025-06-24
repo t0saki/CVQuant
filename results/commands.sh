@@ -1,0 +1,1 @@
+python3 main.py --model resnet18_low_rank --dataset cifar10 --methods static qat --enable-distillation --teacher-model resnet50 --batch-size 32 --calibration-size 1000 --evaluation-size 500 --device cpu --output-dir ./demo_results/quick_distillation --backend qnnpack

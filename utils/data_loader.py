@@ -201,15 +201,15 @@ class DatasetLoader:
         if dataset_name.lower() == 'cifar10':
             # --- 传递 input_size ---
             full_loader = self.get_cifar10_dataset(
-                batch_size=batch_size, train=False, input_size=input_size)
+                batch_size=batch_size, train=True, input_size=input_size)
         elif dataset_name.lower() == 'cifar100':
             # --- 传递 input_size ---
             full_loader = self.get_cifar100_dataset(
-                batch_size=batch_size, train=False, input_size=input_size)
+                batch_size=batch_size, train=True, input_size=input_size)
         elif dataset_name.lower() == 'imagenet':
             full_loader = self.get_imagenet_subset(
                 batch_size=batch_size, subset_size=calibration_size,
-                input_size=input_size, train=False
+                input_size=input_size, train=True
             )
         else:
             raise ValueError(f"Unknown dataset: {dataset_name}")

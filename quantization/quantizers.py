@@ -359,7 +359,7 @@ class StaticQuantizer(BaseQuantizer):
 class QATQuantizer(BaseQuantizer):
     """Quantization Aware Training implementation with torch.ao support and optional knowledge distillation."""
 
-    def __init__(self, device: torch.device = None, backend: str = None, train_epochs: int = 3, learning_rate: float = 1e-4, **kwargs):
+    def __init__(self, device: torch.device = None, backend: str = None, train_epochs: int = 10, learning_rate: float = 5e-6, **kwargs):
         super().__init__(device, **kwargs)
         self.backend = backend or (
             'fbgemm' if device and device.type == 'cuda' else 'qnnpack')
@@ -618,33 +618,70 @@ class QuantizationBenchmark(BaseQuantizer):
         self.results = {}
         example_input = next(iter(calibration_data))[0][:1]
 
-        print("Evaluating original (unquantized) model...")
-        original_model_to_eval, lrf_model = (self._load_original_resnet_for_lrf(
-            model), model) if 'low_rank' in self.model_name else (model, None)
+        is_lrf_model = 'low_rank' in self.model_name
+        student_model = model  # The model passed in is our main subject
 
+        # --- REVISED LOGIC START ---
+
+        # 1. Establish the ultimate baseline: the original, non-factorized model.
+        # This gives a consistent reference for all speedup/compression calculations.
+        if is_lrf_model:
+            print("Loading original (non-LRF) model for baseline comparison...")
+            original_model_baseline = self._load_original_resnet_for_lrf(
+                student_model)
+        else:
+            # If the student is not an LRF model, it IS the baseline.
+            original_model_baseline = student_model
+
+        print("Evaluating baseline (unquantized) model...")
         original_eval = self.evaluate_model(
-            original_model_to_eval, evaluation_data)
+            original_model_baseline, evaluation_data)
         original_time = self.measure_inference_time(
-            original_model_to_eval, example_input)
-        original_size = self._get_model_size(original_model_to_eval)
-        self.results['original'] = {'accuracy': original_eval['accuracy'],
-                                    'loss': original_eval['loss'], 'model_size_mb': original_size, **original_time}
+            original_model_baseline, example_input)
+        original_size = self._get_model_size(original_model_baseline)
 
-        if lrf_model:
-            print("\nEvaluating LRF (unquantized) model...")
-            lrf_eval = self.evaluate_model(lrf_model, evaluation_data)
-            lrf_time = self.measure_inference_time(lrf_model, example_input)
-            lrf_size = self._get_model_size(lrf_model)
-            self.results['lrf'] = {'accuracy': lrf_eval['accuracy'],
-                                   'loss': lrf_eval['loss'], 'model_size_mb': lrf_size, **lrf_time}
+        # Save baseline stats for later calculations
+        self.results['original'] = {
+            'accuracy': original_eval['accuracy'],
+            'loss': original_eval['loss'],
+            'model_size_mb': original_size,
+            'speedup': 1.0,
+            'compression_ratio': 1.0,
+            **original_time
+        }
+        original_time_ms = self.results['original']['mean_time_ms']
+        original_size_mb = self.results['original']['model_size_mb']
 
+        # 2. If the student is an LRF model, evaluate it as its own separate entry.
+        # This will now correctly measure its reduced size.
+        if is_lrf_model:
+            print("\nEvaluating LRF (unquantized) student model...")
+            lrf_eval = self.evaluate_model(student_model, evaluation_data)
+            lrf_time = self.measure_inference_time(
+                student_model, example_input)
+            lrf_size = self._get_model_size(student_model)
+            speedup = original_time_ms / \
+                lrf_time['mean_time_ms'] if lrf_time['mean_time_ms'] > 0 else 0
+            compression = original_size_mb / lrf_size if lrf_size > 0 else 0
+
+            self.results['lrf'] = {
+                'accuracy': lrf_eval['accuracy'],
+                'loss': lrf_eval['loss'],
+                'model_size_mb': lrf_size,
+                'speedup': speedup,
+                'compression_ratio': compression,
+                **lrf_time
+            }
+
+        # 3. Proceed with quantization experiments on the student model.
         self.quantizers = get_available_quantizers(
             backend=self.backend, device=self.device, model_name=self.model_name)
-        model_to_quantize = lrf_model if lrf_model else model
+
+        model_to_quantize = student_model
 
         for method_name in methods:
             quantizer = self.quantizers[method_name]
-            result_key = f"lrf_{method_name}" if lrf_model else method_name
+            result_key = f"lrf_{method_name}" if is_lrf_model else method_name
             print(f"\nBenchmarking {result_key} quantization...")
 
             try:
@@ -668,13 +705,20 @@ class QuantizationBenchmark(BaseQuantizer):
                 time_stats = quantizer.measure_inference_time(
                     quantized_model, example_input)
                 model_size_mb = self._get_model_size(quantized_model)
-                speedup = self.results['original']['mean_time_ms'] / \
-                    time_stats['mean_time_ms'] if time_stats['mean_time_ms'] > 0 else 0
-                compression = self.results['original']['model_size_mb'] / \
-                    model_size_mb if model_size_mb > 0 else 0
 
-                self.results[result_key] = {'accuracy': eval_metrics['accuracy'], 'loss': eval_metrics['loss'],
-                                            'model_size_mb': model_size_mb, 'speedup': speedup, 'compression_ratio': compression, **time_stats}
+                # Always calculate speedup and compression against the true original model
+                speedup = original_time_ms / \
+                    time_stats['mean_time_ms'] if time_stats['mean_time_ms'] > 0 else 0
+                compression = original_size_mb / model_size_mb if model_size_mb > 0 else 0
+
+                self.results[result_key] = {
+                    'accuracy': eval_metrics['accuracy'],
+                    'loss': eval_metrics['loss'],
+                    'model_size_mb': model_size_mb,
+                    'speedup': speedup,
+                    'compression_ratio': compression,
+                    **time_stats
+                }
 
             except Exception as e:
                 print(f"Error benchmarking {method_name}: {e}")
@@ -766,7 +810,7 @@ def get_available_quantizers(backend: str = 'qnnpack', device: torch.device = No
     return {
         'dynamic': DynamicQuantizer(device=device, backend=backend, model_name=model_name),
         'static': StaticQuantizer(device=device, backend=backend, model_name=model_name),
-        'qat': QATQuantizer(device=device, backend=backend, train_epochs=3, learning_rate=1e-5, model_name=model_name),
+        'qat': QATQuantizer(device=device, backend=backend, train_epochs=10, learning_rate=5e-6, model_name=model_name),
         'fx': FXQuantizer(device=device, backend=backend, model_name=model_name),
         'int8': INT8Quantizer(device=device, backend=backend, model_name=model_name),
         'official': OfficialQuantizedQuantizer(device=device, backend=backend, model_name=model_name),
