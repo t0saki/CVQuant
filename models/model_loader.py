@@ -63,6 +63,10 @@ class ModelLoader:
             'mobilenet_v4_conv_small': self._load_mobilenet_v4_conv_small,
             'mobilenet_v4_conv_medium': self._load_mobilenet_v4_conv_medium,
             'mobilenet_v4_conv_large': self._load_mobilenet_v4_conv_large,
+            'efficientnetv2_s': self._load_efficientnetv2_s,
+            'efficientnetv2_m': self._load_efficientnetv2_m,
+            'efficientnetv2_l': self._load_efficientnetv2_l,
+            'efficientnetv2_xl': self._load_efficientnetv2_xl,
         }
     
     def load_model(self, model_name: str, pretrained: bool = True, dataset_name: Optional[str] = None, 
@@ -301,6 +305,50 @@ class ModelLoader:
             print(f"Warning: Could not load MobileNet V4 ConvLarge: {e}")
             print("Falling back to MobileNet V3 Large")
             return self._load_mobilenet_v3_large(pretrained)
+    
+    def _load_efficientnetv2_s(self, pretrained: bool = True) -> nn.Module:
+        """Load EfficientNetV2-S model using timm"""
+        try:
+            model = timm.create_model('efficientnetv2_s.in1k', 
+                                    pretrained=pretrained, num_classes=self.num_classes)
+            return model
+        except Exception as e:
+            print(f"Warning: Could not load EfficientNetV2-S: {e}")
+            print("Falling back to ResNet-50")
+            return self._load_resnet50(pretrained)
+    
+    def _load_efficientnetv2_m(self, pretrained: bool = True) -> nn.Module:
+        """Load EfficientNetV2-M model using timm"""
+        try:
+            model = timm.create_model('efficientnetv2_m.in1k', 
+                                    pretrained=pretrained, num_classes=self.num_classes)
+            return model
+        except Exception as e:
+            print(f"Warning: Could not load EfficientNetV2-M: {e}")
+            print("Falling back to ResNet-50")
+            return self._load_resnet50(pretrained)
+    
+    def _load_efficientnetv2_l(self, pretrained: bool = True) -> nn.Module:
+        """Load EfficientNetV2-L model using timm"""
+        try:
+            model = timm.create_model('efficientnetv2_l.in1k', 
+                                    pretrained=pretrained, num_classes=self.num_classes)
+            return model
+        except Exception as e:
+            print(f"Warning: Could not load EfficientNetV2-L: {e}")
+            print("Falling back to ResNet-50")
+            return self._load_resnet50(pretrained)
+    
+    def _load_efficientnetv2_xl(self, pretrained: bool = True) -> nn.Module:
+        """Load EfficientNetV2-XL model using timm"""
+        try:
+            model = timm.create_model('efficientnetv2_xl.in1k', 
+                                    pretrained=pretrained, num_classes=self.num_classes)
+            return model
+        except Exception as e:
+            print(f"Warning: Could not load EfficientNetV2-XL: {e}")
+            print("Falling back to ResNet-50")
+            return self._load_resnet50(pretrained)
 
     def get_model_info(self, model: nn.Module, bytes: int = 4) -> Dict[str, Any]:
         """
@@ -497,7 +545,6 @@ class ModelLoader:
             print(f"Teacher fine-tuning failed: {e}")
             print("Using pretrained teacher weights")
             return teacher_model
-
 
 def get_available_models() -> list:
     """Get list of available model names"""

@@ -390,22 +390,22 @@ def get_compatible_teacher_models(student_model_name: str) -> list:
     # Define teacher-student compatibility mappings
     compatibility_map = {
         # ResNet students
-        'resnet18': ['resnet50', 'resnet50_quantizable'],
-        'resnet18_quantizable': ['resnet50', 'resnet50_quantizable', 'resnet18'],
-        'resnet18_low_rank': ['resnet50', 'resnet50_quantizable', 'resnet18', 'resnet18_quantizable'],
+        'resnet18': ['resnet50', 'resnet50_quantizable', 'efficientnetv2_s', 'efficientnetv2_m'],
+        'resnet18_quantizable': ['resnet50', 'resnet50_quantizable', 'resnet18', 'efficientnetv2_s', 'efficientnetv2_m'],
+        'resnet18_low_rank': ['resnet50', 'resnet50_quantizable', 'resnet18', 'resnet18_quantizable', 'efficientnetv2_s', 'efficientnetv2_m'],
         
         # MobileNet students
-        'mobilenet_v3_small': ['mobilenet_v3_large', 'mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large'],
+        'mobilenet_v3_small': ['mobilenet_v3_large', 'mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large', 'efficientnetv2_s', 'efficientnetv2_m'],
         'mobilenet_v3_small_quantizable': ['mobilenet_v3_large', 'mobilenet_v3_large_quantizable', 
-                                          'mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large'],
-        'mobilenet_v3_large': ['mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large'],
-        'mobilenet_v3_large_quantizable': ['mobilenet_v3_large', 'mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large'],
-        'mobilenet_v4_conv_small': ['mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large'],
-        'mobilenet_v4_conv_medium': ['mobilenet_v4_conv_large'],
+                                          'mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large', 'efficientnetv2_s', 'efficientnetv2_m'],
+        'mobilenet_v3_large': ['mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large', 'efficientnetv2_m', 'efficientnetv2_l'],
+        'mobilenet_v3_large_quantizable': ['mobilenet_v3_large', 'mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large', 'efficientnetv2_m', 'efficientnetv2_l'],
+        'mobilenet_v4_conv_small': ['mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large', 'efficientnetv2_s', 'efficientnetv2_m'],
+        'mobilenet_v4_conv_medium': ['mobilenet_v4_conv_large', 'efficientnetv2_m', 'efficientnetv2_l'],
         
         # Cross-architecture possibilities (ResNet -> MobileNet is generally not recommended due to different architectures)
         # But we can allow some flexibility
-        'mobilenet_v2': ['mobilenet_v3_large', 'mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large'],
+        'mobilenet_v2': ['mobilenet_v3_large', 'mobilenet_v4_conv_medium', 'mobilenet_v4_conv_large', 'efficientnetv2_s', 'efficientnetv2_m'],
     }
     
     return compatibility_map.get(student_model_name, [])
@@ -433,6 +433,7 @@ def auto_select_teacher_model(student_model_name: str, available_models: list = 
     
     # Priority ranking for teacher selection (larger/more complex models first)
     priority_order = [
+        'efficientnetv2_xl', 'efficientnetv2_l', 'efficientnetv2_m', 'efficientnetv2_s',
         'resnet50_quantizable', 'resnet50',
         'mobilenet_v4_conv_large', 'mobilenet_v4_conv_medium',
         'mobilenet_v3_large_quantizable', 'mobilenet_v3_large',
