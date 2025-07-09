@@ -320,7 +320,7 @@ class ModelLoader:
     def _load_efficientnetv2_m(self, pretrained: bool = True) -> nn.Module:
         """Load EfficientNetV2-M model using timm"""
         try:
-            model = timm.create_model('efficientnetv2_m.in1k', 
+            model = timm.create_model('tf_efficientnetv2_m.in21k', 
                                     pretrained=pretrained, num_classes=self.num_classes)
             return model
         except Exception as e:
@@ -331,7 +331,7 @@ class ModelLoader:
     def _load_efficientnetv2_l(self, pretrained: bool = True) -> nn.Module:
         """Load EfficientNetV2-L model using timm"""
         try:
-            model = timm.create_model('efficientnetv2_l.in1k', 
+            model = timm.create_model('efficientnetv2_l.in21k', 
                                     pretrained=pretrained, num_classes=self.num_classes)
             return model
         except Exception as e:

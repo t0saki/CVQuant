@@ -41,6 +41,7 @@ class DatasetLoader:
             transform = transforms.Compose([
                 transforms.RandomResizedCrop(input_size),
                 transforms.RandomHorizontalFlip(),
+                transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
                 transforms.ToTensor(),
                 self.imagenet_normalize
             ])
@@ -138,45 +139,67 @@ class DatasetLoader:
                            subset_size: int = 1000, input_size: int = 224,
                            train: bool = False) -> DataLoader:
         """
-        Get ImageNet subset (uses CIFAR-10 as proxy for demo purposes)
+        Get ImageNet subset or real ImageNet dataset
         
         Args:
             batch_size: Batch size
             num_workers: Number of worker processes
-            subset_size: Size of subset
+            subset_size: Size of subset (only used for fallback proxy)
             input_size: Input image size
             train: Whether to load training set
             
         Returns:
-            DataLoader for ImageNet subset
+            DataLoader for ImageNet or ImageNet proxy
         """
-        print("Note: Using CIFAR-10 resized to ImageNet size as ImageNet proxy for demo")
-        
+        # Real ImageNet transforms
         if train:
             base_transform = transforms.Compose([
-                transforms.Resize((input_size, input_size)),
+                transforms.RandomResizedCrop(input_size),
                 transforms.RandomHorizontalFlip(),
+                transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
                 transforms.ToTensor(),
                 self.imagenet_normalize
             ])
         else:
             base_transform = transforms.Compose([
-                transforms.Resize((input_size, input_size)),
+                transforms.Resize(int(input_size * 1.143)),  # Resize to 256 for 224
+                transforms.CenterCrop(input_size),
                 transforms.ToTensor(),
                 self.imagenet_normalize
             ])
         
-        # Use CIFAR-10 as proxy
-        full_dataset = torchvision.datasets.CIFAR10(
-            root=self.data_path, train=train, download=self.download, transform=base_transform
-        )
-        
-        # Create subset
-        if subset_size < len(full_dataset):
-            indices = random.sample(range(len(full_dataset)), subset_size)
-            dataset = Subset(full_dataset, indices)
-        else:
-            dataset = full_dataset
+        try:
+            # Try to load real ImageNet dataset
+            split = 'train' if train else 'val'
+            full_dataset = torchvision.datasets.ImageNet(
+                root=self.data_path, split=split, transform=base_transform
+            )
+            print(f"Using real ImageNet dataset (split: {split})")
+            
+            # For real ImageNet, we might still want to use a subset for faster processing
+            if subset_size > 0 and subset_size < len(full_dataset):
+                indices = random.sample(range(len(full_dataset)), subset_size)
+                dataset = Subset(full_dataset, indices)
+                print(f"Using ImageNet subset: {subset_size} samples from {len(full_dataset)} total")
+            else:
+                dataset = full_dataset
+                print(f"Using full ImageNet dataset: {len(full_dataset)} samples")
+                
+        except (RuntimeError, FileNotFoundError) as e:
+            print(f"Warning: Could not load real ImageNet dataset: {e}")
+            print("Falling back to CIFAR-10 resized to ImageNet size as ImageNet proxy for demo")
+            
+            # Fallback: Use CIFAR-10 as proxy with ImageNet preprocessing
+            full_dataset = torchvision.datasets.CIFAR10(
+                root=self.data_path, train=train, download=self.download, transform=base_transform
+            )
+            
+            # Create subset
+            if subset_size < len(full_dataset):
+                indices = random.sample(range(len(full_dataset)), subset_size)
+                dataset = Subset(full_dataset, indices)
+            else:
+                dataset = full_dataset
         
         return DataLoader(
             dataset, batch_size=batch_size, shuffle=train,
